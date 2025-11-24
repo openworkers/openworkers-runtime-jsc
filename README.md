@@ -30,9 +30,9 @@ src/
 - [x] Basic JavaScriptCore context
 - [x] console.log
 - [x] Event loop architecture with Tokio
-- [x] setTimeout (with proper async execution)
-- [x] setInterval (repeating timers)
-- [x] clearTimeout/clearInterval (cancel timers)
+- [x] **Timers**: setTimeout, setInterval, clearTimeout, clearInterval
+- [x] **Promises**: Native JSCore Promise support (resolve, reject, then, catch, all, race)
+- [x] **Microtasks**: queueMicrotask API
 - [ ] fetch API
 - [ ] Event handlers (fetch, scheduled)
 
@@ -87,6 +87,30 @@ async fn main() {
 cargo build
 cargo run
 ```
+
+## Testing
+
+```bash
+cargo test
+```
+
+### Test Coverage
+
+| Category | Tests | Description |
+|----------|-------|-------------|
+| **Console** | 4 | console.log with strings, numbers, objects, special values |
+| **Error Handling** | 4 | Syntax errors, undefined variables, callback errors |
+| **Timers** | 7 | setTimeout, setInterval, clear functions, execution order, nested timers |
+| **Promises** | 9 | resolve, reject, chains, constructor, Promise.all, Promise.race, queueMicrotask |
+| **Integration** | 3 | Comprehensive scenarios, Date.now(), Math operations |
+
+**Total: 27 tests** ✅
+
+All tests validate:
+- Async execution with Tokio
+- Proper callback timing
+- Clean shutdown behavior
+- Error handling and edge cases
 
 ## Comparison with openworkers-runtime (Deno)
 

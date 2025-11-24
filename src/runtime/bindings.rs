@@ -40,14 +40,63 @@ pub fn setup_console(context: &mut JSContext) {
     let log_fn = JSValue::callback(context, Some(console_log));
 
     // Create console object via JS and add log method
-    context.evaluate_script("globalThis.console = {}", 1).unwrap();
-    let console_obj = global.get_property(context, "console")
+    context
+        .evaluate_script("globalThis.console = {}", 1)
+        .unwrap();
+    let console_obj = global
+        .get_property(context, "console")
         .unwrap()
         .to_object(context)
         .unwrap();
 
     let mut console_mut = console_obj;
     console_mut.set_property(context, "log", log_fn).unwrap();
+}
+
+#[callback]
+fn queue_microtask_fn(
+    mut ctx: JSContext,
+    _function: JSObject,
+    _this: JSObject,
+    args: &[JSValue],
+) -> Result<JSValue, JSValue> {
+    if args.is_empty() {
+        return Err(JSValue::string(&ctx, "queueMicrotask requires a function"));
+    }
+
+    let callback = match args[0].to_object(&ctx) {
+        Ok(obj) => obj,
+        Err(_) => return Err(JSValue::string(&ctx, "Argument must be a function")),
+    };
+
+    // Use Promise.resolve().then() to queue as microtask
+    // This is the standard web platform approach
+    let script = r#"
+        (function(callback) {
+            Promise.resolve().then(callback);
+        })
+    "#;
+
+    match ctx.evaluate_script(script, 1) {
+        Ok(wrapper) => {
+            if let Ok(wrapper_fn) = wrapper.to_object(&ctx) {
+                let _ = wrapper_fn.call_as_function(&ctx, None, &[callback.into()]);
+            }
+        }
+        Err(_) => {}
+    }
+
+    Ok(JSValue::undefined(&ctx))
+}
+
+/// Setup queueMicrotask binding
+pub fn setup_microtask(context: &mut JSContext) {
+    let microtask_fn = JSValue::callback(context, Some(queue_microtask_fn));
+
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "queueMicrotask", microtask_fn)
+        .unwrap();
 }
 
 /// Setup timer bindings (setTimeout, setInterval, clearTimeout, clearInterval)
@@ -59,7 +108,12 @@ pub fn setup_timer(
     intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
     // Setup setTimeout
-    setup_set_timeout(context, scheduler_tx.clone(), callbacks.clone(), next_id.clone());
+    setup_set_timeout(
+        context,
+        scheduler_tx.clone(),
+        callbacks.clone(),
+        next_id.clone(),
+    );
 
     // Setup setInterval
     setup_set_interval(
@@ -122,7 +176,11 @@ fn setup_set_timeout(
             // Schedule the timeout
             let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleTimeout(callback_id, delay));
 
-            log::debug!("setTimeout: registered callback {} with delay {}ms", callback_id, delay);
+            log::debug!(
+                "setTimeout: registered callback {} with delay {}ms",
+                callback_id,
+                delay
+            );
 
             // Return the timeout ID
             Ok(JSValue::number(&ctx, callback_id as f64))
@@ -190,9 +248,14 @@ fn setup_set_interval(
             }
 
             // Schedule the interval
-            let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleInterval(callback_id, interval));
+            let _ =
+                scheduler_tx_clone.send(SchedulerMessage::ScheduleInterval(callback_id, interval));
 
-            log::debug!("setInterval: registered callback {} with interval {}ms", callback_id, interval);
+            log::debug!(
+                "setInterval: registered callback {} with interval {}ms",
+                callback_id,
+                interval
+            );
 
             // Return the interval ID
             Ok(JSValue::number(&ctx, callback_id as f64))
@@ -207,7 +270,10 @@ fn setup_set_interval(
 }
 
 /// Setup clearTimeout and clearInterval bindings (same implementation for both)
-fn setup_clear_timer(context: &mut JSContext, scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>) {
+fn setup_clear_timer(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+) {
     let scheduler_tx_clone = scheduler_tx.clone();
 
     // Create clearTimeout function

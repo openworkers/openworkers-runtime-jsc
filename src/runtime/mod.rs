@@ -27,6 +27,10 @@ pub enum CallbackMessage {
     ExecuteTimeout(CallbackId),
     /// Execute an interval callback (repeating)
     ExecuteInterval(CallbackId),
+    /// Execute a Promise resolve callback with string result
+    ExecutePromiseResolve(CallbackId, String),
+    /// Execute a Promise reject callback with error
+    ExecutePromiseReject(CallbackId, String),
 }
 
 /// Runtime that manages JSContext and tokio event loop
@@ -66,6 +70,9 @@ impl Runtime {
         // Setup console.log
         bindings::setup_console(&mut context);
 
+        // Setup queueMicrotask
+        bindings::setup_microtask(&mut context);
+
         // Setup timer bindings (pass shared state)
         bindings::setup_timer(
             &mut context,
@@ -96,7 +103,9 @@ impl Runtime {
         intervals.remove(&callback_id);
 
         // Send clear message to event loop
-        let _ = self.scheduler_tx.send(SchedulerMessage::ClearTimer(callback_id));
+        let _ = self
+            .scheduler_tx
+            .send(SchedulerMessage::ClearTimer(callback_id));
     }
 
     /// Process pending callbacks (non-blocking)
@@ -120,7 +129,52 @@ impl Runtime {
                                 if let Ok(err_str) = e.to_js_string(&self.context) {
                                     log::error!("Callback {} failed: {}", callback_id, err_str);
                                 } else {
-                                    log::error!("Callback {} failed with unknown error", callback_id);
+                                    log::error!(
+                                        "Callback {} failed with unknown error",
+                                        callback_id
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
+                    // Execute resolve callback with result
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Executing promise resolve callback {}", callback_id);
+
+                        let result_val = JSValue::string(&self.context, result_str.as_str());
+                        match callback.call_as_function(&self.context, None, &[result_val]) {
+                            Ok(_) => log::debug!("Promise resolved successfully"),
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Promise resolve failed: {}", err_str);
+                                }
+                            }
+                        }
+                    }
+                }
+                CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
+                    // Execute reject callback with error
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Executing promise reject callback {}", callback_id);
+
+                        let error_val = JSValue::string(&self.context, error_msg.as_str());
+                        match callback.call_as_function(&self.context, None, &[error_val]) {
+                            Ok(_) => log::debug!("Promise rejected successfully"),
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Promise reject failed: {}", err_str);
                                 }
                             }
                         }
@@ -154,7 +208,10 @@ impl Runtime {
                                 if let Ok(err_str) = e.to_js_string(&self.context) {
                                     log::error!("Interval {} failed: {}", callback_id, err_str);
                                 } else {
-                                    log::error!("Interval {} failed with unknown error", callback_id);
+                                    log::error!(
+                                        "Interval {} failed with unknown error",
+                                        callback_id
+                                    );
                                 }
                             }
                         }
@@ -186,7 +243,11 @@ pub async fn run_event_loop(
     while let Some(msg) = scheduler_rx.recv().await {
         match msg {
             SchedulerMessage::ScheduleTimeout(callback_id, delay_ms) => {
-                log::debug!("Scheduling timeout {} with delay {}ms", callback_id, delay_ms);
+                log::debug!(
+                    "Scheduling timeout {} with delay {}ms",
+                    callback_id,
+                    delay_ms
+                );
 
                 let callback_tx = callback_tx.clone();
                 let handle = tokio::spawn(async move {
