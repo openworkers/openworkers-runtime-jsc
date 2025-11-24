@@ -1,5 +1,5 @@
 [package]
-name = "openworkers-runtime-jscore"
+name = "openworkers-runtime-jsc"
 version = "0.2.0"
 edition = "2024"
 
