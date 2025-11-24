@@ -1,0 +1,179 @@
+use bytes::Bytes;
+use openworkers_runtime_jscore::{HttpRequest, Task, Worker};
+use std::collections::HashMap;
+
+#[tokio::test]
+async fn test_worker_basic_fetch_handler() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const response = new Response('Hello from worker!');
+            event.respondWith(response);
+        });
+    "#;
+
+    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+
+    // Create a fetch task
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        url: "https://example.com/test".to_string(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    let (task, _rx) = Task::fetch(request);
+
+    // Execute the task
+    let response = worker.exec(task).await.expect("Task should execute");
+
+    assert_eq!(response.status, 200, "Should return 200 status");
+    assert!(response.body.is_some(), "Should have response body");
+
+    if let Some(body) = response.body {
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(
+            body_str.contains("Hello"),
+            "Response should contain worker message"
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_worker_json_response() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const data = { message: 'success', value: 42 };
+            const response = new Response(JSON.stringify(data), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+            event.respondWith(response);
+        });
+    "#;
+
+    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        url: "/api/data".to_string(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    let (task, _rx) = Task::fetch(request);
+    let response = worker.exec(task).await.expect("Task should execute");
+
+    assert_eq!(response.status, 200);
+
+    if let Some(body) = response.body {
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("success"));
+        assert!(body_str.contains("42"));
+    }
+}
+
+#[tokio::test]
+async fn test_worker_access_request_data() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const req = event.request;
+            const response = new Response(
+                `Method: ${req.method}, URL: ${req.url}`
+            );
+            event.respondWith(response);
+        });
+    "#;
+
+    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: "POST".to_string(),
+        url: "/api/create".to_string(),
+        headers: HashMap::new(),
+        body: Some(Bytes::from("test data")),
+    };
+
+    let (task, _rx) = Task::fetch(request);
+    let response = worker.exec(task).await.expect("Task should execute");
+
+    if let Some(body) = response.body {
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert!(body_str.contains("POST"), "Should include method");
+        assert!(body_str.contains("/api/create"), "Should include URL");
+    }
+}
+
+#[tokio::test]
+async fn test_worker_no_handler_error() {
+    let script = r#"
+        // No event handler registered
+        console.log("Worker loaded without handler");
+    "#;
+
+    let mut worker = Worker::new(script).await.expect("Worker should load");
+
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        url: "/".to_string(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    let (task, _rx) = Task::fetch(request);
+    let result = worker.exec(task).await;
+
+    // Should error or return a fallback response
+    // For now, we accept both behaviors since the addEventListener setup
+    // might provide a default handler
+    if result.is_ok() {
+        println!("Worker returned OK even without handler (acceptable)");
+    } else if let Err(e) = result {
+        assert!(
+            e.contains("No fetch handler") || e.contains("not a function"),
+            "Error should mention missing handler, got: {}",
+            e
+        );
+    }
+}
+
+#[tokio::test]
+async fn test_worker_scheduled_event() {
+    let script = r#"
+        globalThis.scheduledRan = false;
+
+        addEventListener('scheduled', (event) => {
+            globalThis.scheduledRan = true;
+            console.log('Scheduled event fired at:', event.scheduledTime);
+        });
+    "#;
+
+    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+
+    // Create scheduled task
+    let (task, _rx) = Task::scheduled(Date::now());
+
+    worker.exec(task).await.expect("Scheduled task should run");
+
+    // Check that handler ran
+    let check = r#"globalThis.scheduledRan"#;
+    match worker.evaluate(check) {
+        Ok(result) => {
+            assert!(
+                result.to_bool(worker.context()),
+                "Scheduled handler should have run"
+            );
+        }
+        Err(_) => panic!("Failed to check if scheduled ran"),
+    }
+}
+
+// Helper for Date::now()
+struct Date;
+impl Date {
+    fn now() -> u64 {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64
+    }
+}

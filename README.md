@@ -20,9 +20,16 @@ This project explores using JavaScriptCore (via `rusty_jsc`) as a JavaScript run
 src/
 ├── lib.rs              # Library entry point
 ├── main.rs             # Usage example
+├── task.rs             # Task types (Fetch, Scheduled)
+├── worker.rs           # Worker with event handlers
 └── runtime/
-    ├── mod.rs          # Main runtime
-    └── bindings.rs     # JavaScript bindings
+    ├── mod.rs          # Main runtime & event loop
+    ├── bindings.rs     # JavaScript bindings
+    └── fetch/
+        ├── mod.rs      # Fetch types
+        ├── headers.rs  # Headers API
+        ├── request.rs  # Request parsing & execution
+        └── response.rs # Response object creation
 ```
 
 ## Current Features
@@ -33,14 +40,66 @@ src/
 - [x] **Timers**: setTimeout, setInterval, clearTimeout, clearInterval
 - [x] **Promises**: Native JSCore Promise support (resolve, reject, then, catch, all, race)
 - [x] **Microtasks**: queueMicrotask API
-- [x] **fetch API**: HTTP requests with reqwest (GET, POST, PUT, DELETE)
-  - Response object with status, ok, text(), json()
+- [x] **fetch API**: HTTP requests with reqwest (GET, POST, PUT, DELETE, PATCH, HEAD)
+  - Request: method, headers, body
+  - Response: status, ok, headers.get(), headers.has(), text(), json()
   - Promise-based async API
-- [ ] Event handlers (fetch, scheduled)
+- [x] **Worker/Task API**: OpenWorkers-compatible event handlers
+  - addEventListener('fetch', handler)
+  - addEventListener('scheduled', handler)
+  - Task-based execution model
 
 ## Usage
 
-### Basic Example
+### Worker API (OpenWorkers-compatible)
+
+```rust
+use openworkers_runtime_jscore::{HttpRequest, Task, Worker};
+use bytes::Bytes;
+use std::collections::HashMap;
+
+#[tokio::main]
+async fn main() {
+    // Load worker script
+    let script = r#"
+        addEventListener('fetch', async (event) => {
+            const request = event.request;
+
+            const data = {
+                method: request.method,
+                url: request.url,
+                timestamp: Date.now()
+            };
+
+            const response = new Response(JSON.stringify(data), {
+                status: 200,
+                headers: { 'Content-Type': 'application/json' }
+            });
+
+            event.respondWith(response);
+        });
+    "#;
+
+    let mut worker = Worker::new(script).await.unwrap();
+
+    // Create HTTP request
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        url: "https://example.com/api".to_string(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    // Execute task
+    let (task, _rx) = Task::fetch(request);
+    let response = worker.exec(task).await.unwrap();
+
+    println!("Status: {}", response.status);
+    println!("Body: {:?}", response.body);
+}
+```
+
+### Basic Runtime API
 
 ```rust
 use openworkers_runtime_jscore::{run_event_loop, Runtime};
@@ -105,9 +164,10 @@ cargo test
 | **Timers** | 7 | setTimeout, setInterval, clear functions, execution order, nested timers |
 | **Promises** | 9 | resolve, reject, chains, constructor, Promise.all, Promise.race, queueMicrotask |
 | **Fetch** | 7 | GET/POST, text(), json(), headers, body, status codes |
+| **Worker/Task** | 5 | addEventListener, fetch events, scheduled events, request/response handling |
 | **Integration** | 3 | Comprehensive scenarios, Date.now(), Math operations |
 
-**Total: 34 tests** ✅
+**Total: 39 tests** ✅
 
 All tests validate:
 - Async execution with Tokio
