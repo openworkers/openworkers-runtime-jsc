@@ -1,15 +1,18 @@
 [package]
 name = "openworkers-runtime-jsc"
 version = "0.2.0"
-edition = "2024"
+edition = "2021"
 
 [features]
 actix = ["dep:actix-web"]
 
 [dependencies]
-# JSCore runtime (using local fork)
-rusty_jsc = { path = "/Users/max/Documents/forks/rusty_jsc" }
-rusty_jsc_macros = { path = "/Users/max/Documents/forks/rusty_jsc/macros" }
+# JSCore runtime
+rusty_jsc = "0.1.0"
+rusty_jsc_macros = "0.1.0"
+
+# For direct JSC FFI bindings (context groups)
+libc = "0.2"
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
