@@ -1,4 +1,4 @@
-use openworkers_runtime_jscore::{run_event_loop, Runtime};
+use openworkers_runtime_jscore::{Runtime, run_event_loop};
 use std::time::Duration;
 
 #[tokio::main]

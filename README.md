@@ -41,9 +41,12 @@ src/
 - [x] **Promises**: Native JSCore Promise support (resolve, reject, then, catch, all, race)
 - [x] **Microtasks**: queueMicrotask API
 - [x] **fetch API**: HTTP requests with reqwest (GET, POST, PUT, DELETE, PATCH, HEAD)
-  - Request: method, headers, body
+  - Request: method, headers, body, text(), json()
   - Response: status, ok, headers.get(), headers.has(), text(), json()
   - Promise-based async API
+- [x] **URL API**: URL and URLSearchParams parsing
+  - URL: protocol, hostname, pathname, search, hash, origin
+  - URLSearchParams: get, has, set, delete
 - [x] **Worker/Task API**: OpenWorkers-compatible event handlers
   - addEventListener('fetch', handler)
   - addEventListener('scheduled', handler)
@@ -53,36 +56,39 @@ src/
 
 ### Worker API (OpenWorkers-compatible)
 
+This runtime provides a drop-in replacement API for `openworkers-runtime`:
+
 ```rust
-use openworkers_runtime_jscore::{HttpRequest, Task, Worker};
+use openworkers_runtime_jscore::{HttpRequest, Task, Worker, Script, RuntimeLimits};
 use bytes::Bytes;
 use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() {
     // Load worker script
-    let script = r#"
+    let script = Script::new(r#"
         addEventListener('fetch', async (event) => {
             const request = event.request;
 
-            const data = {
+            const response = new Response(JSON.stringify({
                 method: request.method,
                 url: request.url,
                 timestamp: Date.now()
-            };
-
-            const response = new Response(JSON.stringify(data), {
+            }), {
                 status: 200,
                 headers: { 'Content-Type': 'application/json' }
             });
 
             event.respondWith(response);
         });
-    "#;
+    "#);
 
-    let mut worker = Worker::new(script).await.unwrap();
+    // Create worker (compatible with openworkers-runtime)
+    let mut worker = Worker::new_with_options(script, None, None)
+        .await
+        .unwrap();
 
-    // Create HTTP request
+    // Create and execute task
     let request = HttpRequest {
         method: "GET".to_string(),
         url: "https://example.com/api".to_string(),
@@ -90,12 +96,14 @@ async fn main() {
         body: None,
     };
 
-    // Execute task
     let (task, _rx) = Task::fetch(request);
-    let response = worker.exec(task).await.unwrap();
 
-    println!("Status: {}", response.status);
-    println!("Body: {:?}", response.body);
+    // Two execution modes:
+    // 1. Compatible API (returns TerminationReason)
+    let termination = worker.exec(task).await.unwrap();
+
+    // 2. Direct API (returns HttpResponse)
+    // let response = worker.exec_http(task).await.unwrap();
 }
 ```
 
@@ -165,9 +173,10 @@ cargo test
 | **Promises** | 9 | resolve, reject, chains, constructor, Promise.all, Promise.race, queueMicrotask |
 | **Fetch** | 7 | GET/POST, text(), json(), headers, body, status codes |
 | **Worker/Task** | 5 | addEventListener, fetch events, scheduled events, request/response handling |
+| **URL** | 3 | URL parsing, URLSearchParams, pathname extraction |
 | **Integration** | 3 | Comprehensive scenarios, Date.now(), Math operations |
 
-**Total: 39 tests** ✅
+**Total: 42 tests** ✅
 
 All tests validate:
 - Async execution with Tokio

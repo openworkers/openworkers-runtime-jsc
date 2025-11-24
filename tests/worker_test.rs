@@ -11,7 +11,10 @@ async fn test_worker_basic_fetch_handler() {
         });
     "#;
 
-    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should initialize");
 
     // Create a fetch task
     let request = HttpRequest {
@@ -24,7 +27,7 @@ async fn test_worker_basic_fetch_handler() {
     let (task, _rx) = Task::fetch(request);
 
     // Execute the task
-    let response = worker.exec(task).await.expect("Task should execute");
+    let response = worker.exec_http(task).await.expect("Task should execute");
 
     assert_eq!(response.status, 200, "Should return 200 status");
     assert!(response.body.is_some(), "Should have response body");
@@ -51,7 +54,10 @@ async fn test_worker_json_response() {
         });
     "#;
 
-    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should initialize");
 
     let request = HttpRequest {
         method: "GET".to_string(),
@@ -61,7 +67,7 @@ async fn test_worker_json_response() {
     };
 
     let (task, _rx) = Task::fetch(request);
-    let response = worker.exec(task).await.expect("Task should execute");
+    let response = worker.exec_http(task).await.expect("Task should execute");
 
     assert_eq!(response.status, 200);
 
@@ -84,7 +90,10 @@ async fn test_worker_access_request_data() {
         });
     "#;
 
-    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should initialize");
 
     let request = HttpRequest {
         method: "POST".to_string(),
@@ -94,7 +103,7 @@ async fn test_worker_access_request_data() {
     };
 
     let (task, _rx) = Task::fetch(request);
-    let response = worker.exec(task).await.expect("Task should execute");
+    let response = worker.exec_http(task).await.expect("Task should execute");
 
     if let Some(body) = response.body {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
@@ -110,7 +119,10 @@ async fn test_worker_no_handler_error() {
         console.log("Worker loaded without handler");
     "#;
 
-    let mut worker = Worker::new(script).await.expect("Worker should load");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should load");
 
     let request = HttpRequest {
         method: "GET".to_string(),
@@ -120,7 +132,7 @@ async fn test_worker_no_handler_error() {
     };
 
     let (task, _rx) = Task::fetch(request);
-    let result = worker.exec(task).await;
+    let result = worker.exec_http(task).await;
 
     // Should error or return a fallback response
     // For now, we accept both behaviors since the addEventListener setup
@@ -147,12 +159,18 @@ async fn test_worker_scheduled_event() {
         });
     "#;
 
-    let mut worker = Worker::new(script).await.expect("Worker should initialize");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should initialize");
 
     // Create scheduled task
     let (task, _rx) = Task::scheduled(Date::now());
 
-    worker.exec(task).await.expect("Scheduled task should run");
+    worker
+        .exec_http(task)
+        .await
+        .expect("Scheduled task should run");
 
     // Check that handler ran
     let check = r#"globalThis.scheduledRan"#;

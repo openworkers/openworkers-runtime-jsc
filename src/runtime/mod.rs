@@ -1,5 +1,6 @@
 pub mod bindings;
 pub mod fetch;
+mod url;
 
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use std::collections::HashMap;
@@ -82,6 +83,9 @@ impl Runtime {
 
         // Setup queueMicrotask
         bindings::setup_microtask(&mut context);
+
+        // Setup URL API
+        url::setup_url_api(&mut context);
 
         // Setup fetch API
         bindings::setup_fetch(

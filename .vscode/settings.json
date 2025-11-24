@@ -1,3 +1,10 @@
 {
-  "cSpell.words": ["jscore", "openworkers"]
+  "cSpell.words": [
+    "actix",
+    "jscore",
+    "openworkers",
+    "reqwest",
+    "rustls",
+    "serde"
+  ]
 }

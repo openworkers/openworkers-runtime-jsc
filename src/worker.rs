@@ -1,4 +1,4 @@
-use crate::runtime::{run_event_loop, Runtime};
+use crate::runtime::{Runtime, run_event_loop};
 use crate::task::{HttpResponse, Task};
 use bytes::Bytes;
 
@@ -27,15 +27,23 @@ impl Worker {
 }
 
 impl Worker {
-    /// Create a new worker and load the script
-    pub async fn new(script: &str) -> Result<Self, String> {
+    /// Create a new worker with full options (openworkers-runtime compatible)
+    pub async fn new(
+        script: crate::compat::Script,
+        _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
+        _limits: Option<crate::compat::RuntimeLimits>,
+    ) -> Result<Self, String> {
         let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
 
         // Setup addEventListener binding
         setup_event_listener(&mut runtime.context);
 
+        // TODO: Apply environment variables from script.env
+        // TODO: Apply runtime limits
+        // TODO: Wire up log_tx for console output
+
         // Load and evaluate the worker script
-        runtime.evaluate(script).map_err(|e| {
+        runtime.evaluate(&script.code).map_err(|e| {
             if let Ok(err_str) = e.to_js_string(&runtime.context) {
                 format!("Script evaluation failed: {}", err_str)
             } else {
@@ -54,21 +62,42 @@ impl Worker {
         })
     }
 
-    /// Execute a task and return the response
-    pub async fn exec(&mut self, mut task: Task) -> Result<HttpResponse, String> {
+    /// Execute a task and return termination reason (openworkers-runtime compatible)
+    pub async fn exec(
+        &mut self,
+        mut task: Task,
+    ) -> Result<crate::compat::TerminationReason, String> {
         match task {
             Task::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or("FetchInit already consumed")?;
 
                 // Trigger fetch event in JS
-                let response = self.trigger_fetch_event(fetch_init).await?;
-
-                Ok(response)
+                match self.trigger_fetch_event(fetch_init).await {
+                    Ok(_) => Ok(crate::compat::TerminationReason::Success),
+                    Err(_) => Ok(crate::compat::TerminationReason::Exception),
+                }
             }
             Task::Scheduled(ref mut init) => {
                 let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
 
                 // Trigger scheduled event in JS
+                match self.trigger_scheduled_event(scheduled_init).await {
+                    Ok(_) => Ok(crate::compat::TerminationReason::Success),
+                    Err(_) => Ok(crate::compat::TerminationReason::Exception),
+                }
+            }
+        }
+    }
+
+    /// Execute a task and return the HTTP response directly
+    pub async fn exec_http(&mut self, mut task: Task) -> Result<HttpResponse, String> {
+        match task {
+            Task::Fetch(ref mut init) => {
+                let fetch_init = init.take().ok_or("FetchInit already consumed")?;
+                self.trigger_fetch_event(fetch_init).await
+            }
+            Task::Scheduled(ref mut init) => {
+                let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
                 self.trigger_scheduled_event(scheduled_init).await?;
 
                 // Return empty response for scheduled events
@@ -157,9 +186,21 @@ impl Worker {
 
         if let Err(e) = trigger_result {
             let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
-                err_str.to_string()
+                let full_error = err_str.to_string();
+                log::error!("Fetch handler exception: {}", full_error);
+
+                // Try to get stack trace if available
+                if let Ok(err_obj) = e.to_object(&self.runtime.context) {
+                    if let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack") {
+                        if let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context) {
+                            log::error!("Stack trace:\n{}", stack_str);
+                        }
+                    }
+                }
+
+                format!("Fetch handler exception: {}", full_error)
             } else {
-                "Fetch handler error".to_string()
+                "Fetch handler error (unknown)".to_string()
             };
             return Err(error_msg);
         }
@@ -245,15 +286,26 @@ impl Worker {
             .to_object(&self.runtime.context)
             .map_err(|_| "Trigger not a function")?;
 
-        trigger_fn
-            .call_as_function(&self.runtime.context, None, &[event_obj])
-            .map_err(|e| {
-                if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
-                    format!("Scheduled handler error: {}", err_str)
-                } else {
-                    "Scheduled handler error".to_string()
+        if let Err(e) = trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj]) {
+            let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
+                let full_error = err_str.to_string();
+                log::error!("Scheduled handler exception: {}", full_error);
+
+                // Try to get stack trace
+                if let Ok(err_obj) = e.to_object(&self.runtime.context) {
+                    if let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack") {
+                        if let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context) {
+                            log::error!("Stack trace:\n{}", stack_str);
+                        }
+                    }
                 }
-            })?;
+
+                format!("Scheduled handler exception: {}", full_error)
+            } else {
+                "Scheduled handler error (unknown)".to_string()
+            };
+            return Err(error_msg);
+        }
 
         // Process callbacks
         for _ in 0..10 {
@@ -291,8 +343,19 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext) {
                     return event._response || new Response("No response");
                 };
             } else if (type === 'scheduled') {
-                globalThis.__triggerScheduled = function(event) {
-                    handler(event);
+                globalThis.__triggerScheduled = async function(event) {
+                    const promises = [];
+                    event.waitUntil = function(promise) {
+                        promises.push(promise);
+                    };
+
+                    // Call handler
+                    await handler(event);
+
+                    // Wait for all promises
+                    if (promises.length > 0) {
+                        await Promise.all(promises);
+                    }
                 };
             }
         };

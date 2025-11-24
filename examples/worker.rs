@@ -59,7 +59,10 @@ async fn main() {
     "#;
 
     // Create worker
-    let mut worker = Worker::new(script).await.expect("Worker should load");
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should load");
 
     println!("\n=== Test 1: GET /api/hello ===");
     let request1 = HttpRequest {
@@ -70,7 +73,7 @@ async fn main() {
     };
 
     let (task1, _) = Task::fetch(request1);
-    let response1 = worker.exec(task1).await.expect("Task should execute");
+    let response1 = worker.exec_http(task1).await.expect("Task should execute");
 
     println!("Status: {}", response1.status);
     if let Some(body) = response1.body {
@@ -86,7 +89,7 @@ async fn main() {
     };
 
     let (task2, _) = Task::fetch(request2);
-    let response2 = worker.exec(task2).await.expect("Task should execute");
+    let response2 = worker.exec_http(task2).await.expect("Task should execute");
 
     println!("Status: {}", response2.status);
     if let Some(body) = response2.body {
@@ -102,7 +105,7 @@ async fn main() {
     };
 
     let (task3, _) = Task::fetch(request3);
-    let response3 = worker.exec(task3).await.expect("Task should execute");
+    let response3 = worker.exec_http(task3).await.expect("Task should execute");
 
     println!("Status: {}", response3.status);
     if let Some(body) = response3.body {
