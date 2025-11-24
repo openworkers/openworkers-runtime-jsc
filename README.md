@@ -1,228 +1,188 @@
-# OpenWorkers Runtime - JSCore
+# OpenWorkers Runtime - JavaScriptCore
 
-An alternative implementation of the OpenWorkers runtime using JavaScriptCore instead of Deno/V8.
+A JavaScript runtime for OpenWorkers based on [JavaScriptCore](https://developer.apple.com/documentation/javascriptcore) via [rusty_jsc](https://github.com/rustjs/rust-jsc) bindings.
 
-## Goal
+## Features
 
-This project explores using JavaScriptCore (via `rusty_jsc`) as a JavaScript runtime for OpenWorkers, providing a lighter alternative to the current Deno-based solution.
+- ✅ **JavaScriptCore Engine** - Apple's battle-tested JavaScript engine
+- ✅ **Native Promises** - Built-in Promise support (resolve, reject, then, catch, all, race)
+- ✅ **Timers** - setTimeout, setInterval, clearTimeout, clearInterval
+- ✅ **Fetch API** - HTTP requests to external APIs
+- ✅ **Event Handlers** - addEventListener('fetch'), addEventListener('scheduled')
+- ✅ **Console Logging** - console.log/warn/error
+- ✅ **URL API** - URL and URLSearchParams parsing
+- ✅ **Microtasks** - queueMicrotask support
 
-## Architecture
+## Performance
 
-### Main Components
-
-- **Runtime**: Manages the JavaScriptCore context lifecycle and Tokio event loop
-- **Bindings**: Implements native JavaScript APIs (console.log, setTimeout, fetch, etc.)
-- **Event Loop**: Integrates Tokio to handle asynchronous operations
-
-### Project Structure
-
-```
-src/
-├── lib.rs              # Library entry point
-├── main.rs             # Usage example
-├── task.rs             # Task types (Fetch, Scheduled)
-├── worker.rs           # Worker with event handlers
-└── runtime/
-    ├── mod.rs          # Main runtime & event loop
-    ├── bindings.rs     # JavaScript bindings
-    └── fetch/
-        ├── mod.rs      # Fetch types
-        ├── headers.rs  # Headers API
-        ├── request.rs  # Request parsing & execution
-        └── response.rs # Response object creation
+Run benchmark:
+```bash
+cargo run --example benchmark --release
 ```
 
-## Current Features
+### Results (Apple Silicon, Release Mode)
 
-- [x] Basic JavaScriptCore context
-- [x] console.log
-- [x] Event loop architecture with Tokio
-- [x] **Timers**: setTimeout, setInterval, clearTimeout, clearInterval
-- [x] **Promises**: Native JSCore Promise support (resolve, reject, then, catch, all, race)
-- [x] **Microtasks**: queueMicrotask API
-- [x] **fetch API**: HTTP requests with reqwest (GET, POST, PUT, DELETE, PATCH, HEAD)
-  - Request: method, headers, body, text(), json()
-  - Response: status, ok, headers.get(), headers.has(), text(), json()
-  - Promise-based async API
-- [x] **URL API**: URL and URLSearchParams parsing
-  - URL: protocol, hostname, pathname, search, hash, origin
-  - URLSearchParams: get, has, set, delete
-- [x] **Worker/Task API**: OpenWorkers-compatible event handlers
-  - addEventListener('fetch', handler)
-  - addEventListener('scheduled', handler)
-  - Task-based execution model
+```
+Worker::new(): avg=8ms* (500µs after warmup), min=452µs, max=41ms
+exec():        avg=400µs, min=411µs, max=469µs
+Total:         avg=900µs, min=868µs, max=44ms
+```
+
+*First iteration has ~41ms warmup, subsequent runs are ~500µs
+
+### Runtime Comparison
+
+| Runtime | Engine | Worker::new() | exec() | Total | Language |
+|---------|--------|---------------|--------|-------|----------|
+| **[V8](https://github.com/openworkers/openworkers-runtime-v8)** | V8 | 1.9ms | **96µs** ⚡ | 2.0ms | Rust + C++ |
+| **[JSC](https://github.com/openworkers/openworkers-runtime-jsc)** | JavaScriptCore | 0.5ms* | 400µs | **0.9ms** 🏆 | Rust + C |
+| **[Boa](https://github.com/openworkers/openworkers-runtime-boa)** | Boa | 1.1ms | 610µs | 1.7ms | 100% Rust |
+| **[Deno](https://github.com/openworkers/openworkers-runtime)** | V8 + Deno | 21.9ms | 774µs | 22.7ms | Rust + C++ |
+
+*JSC has ~41ms warmup on first run, then stabilizes
+
+**JSC has the fastest total time** after warmup, making it ideal for reusable workers.
+
+## Installation
+
+```toml
+[dependencies]
+openworkers-runtime-jsc = { path = "../openworkers-runtime-jsc" }
+```
+
+Note: Requires local fork of rusty_jsc at `/Users/max/Documents/forks/rusty_jsc`
 
 ## Usage
 
-### Worker API (OpenWorkers-compatible)
-
-This runtime provides a drop-in replacement API for `openworkers-runtime`:
-
 ```rust
-use openworkers_runtime_jscore::{HttpRequest, Task, Worker, Script, RuntimeLimits};
-use bytes::Bytes;
+use openworkers_runtime_jsc::{Worker, Script, Task, HttpRequest};
 use std::collections::HashMap;
 
 #[tokio::main]
 async fn main() {
-    // Load worker script
-    let script = Script::new(r#"
+    let code = r#"
         addEventListener('fetch', async (event) => {
-            const request = event.request;
+            const { pathname } = new URL(event.request.url);
 
-            const response = new Response(JSON.stringify({
-                method: request.method,
-                url: request.url,
-                timestamp: Date.now()
-            }), {
-                status: 200,
-                headers: { 'Content-Type': 'application/json' }
-            });
-
-            event.respondWith(response);
+            if (pathname === '/api') {
+                const response = await fetch('https://api.example.com/data');
+                event.respondWith(response);
+            } else {
+                event.respondWith(new Response('Hello from JSC!'));
+            }
         });
-    "#);
+    "#;
 
-    // Create worker (compatible with openworkers-runtime)
-    let mut worker = Worker::new_with_options(script, None, None)
-        .await
-        .unwrap();
+    let script = Script::new(code);
+    let mut worker = Worker::new(script, None, None).await.unwrap();
 
-    // Create and execute task
-    let request = HttpRequest {
+    let req = HttpRequest {
         method: "GET".to_string(),
-        url: "https://example.com/api".to_string(),
+        url: "http://localhost/".to_string(),
         headers: HashMap::new(),
         body: None,
     };
 
-    let (task, _rx) = Task::fetch(request);
+    let (task, rx) = Task::fetch(req);
+    worker.exec(task).await.unwrap();
 
-    // Two execution modes:
-    // 1. Compatible API (returns TerminationReason)
-    let termination = worker.exec(task).await.unwrap();
-
-    // 2. Direct API (returns HttpResponse)
-    // let response = worker.exec_http(task).await.unwrap();
+    let response = rx.await.unwrap();
+    println!("Status: {}", response.status);
 }
-```
-
-### Basic Runtime API
-
-```rust
-use openworkers_runtime_jscore::{run_event_loop, Runtime};
-
-#[tokio::main]
-async fn main() {
-    let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
-
-    // Spawn background event loop
-    let event_loop = tokio::spawn(async move {
-        run_event_loop(scheduler_rx, callback_tx).await;
-    });
-
-    let script = r#"
-        console.log("Hello from JavaScriptCore!");
-
-        // setTimeout example
-        setTimeout(() => {
-            console.log("This runs after 100ms!");
-        }, 100);
-
-        // setInterval example
-        let count = 0;
-        const intervalId = setInterval(() => {
-            count++;
-            console.log("Interval tick", count);
-            if (count >= 3) {
-                clearInterval(intervalId);
-            }
-        }, 200);
-    "#;
-
-    runtime.evaluate(script).unwrap();
-
-    // Process callbacks
-    for _ in 0..10 {
-        runtime.process_callbacks();
-        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    }
-}
-```
-
-## Building
-
-```bash
-cargo build
-cargo run
 ```
 
 ## Testing
 
 ```bash
+# Run all tests (42 tests)
 cargo test
+
+# Run with output
+cargo test -- --nocapture
 ```
 
 ### Test Coverage
 
-| Category | Tests | Description |
-|----------|-------|-------------|
-| **Console** | 4 | console.log with strings, numbers, objects, special values |
-| **Error Handling** | 4 | Syntax errors, undefined variables, callback errors |
-| **Timers** | 7 | setTimeout, setInterval, clear functions, execution order, nested timers |
-| **Promises** | 9 | resolve, reject, chains, constructor, Promise.all, Promise.race, queueMicrotask |
-| **Fetch** | 7 | GET/POST, text(), json(), headers, body, status codes |
-| **Worker/Task** | 5 | addEventListener, fetch events, scheduled events, request/response handling |
-| **URL** | 3 | URL parsing, URLSearchParams, pathname extraction |
-| **Integration** | 3 | Comprehensive scenarios, Date.now(), Math operations |
+- **Console** (4) - Logging with various types
+- **Error Handling** (4) - Syntax errors, runtime errors
+- **Timers** (7) - setTimeout, setInterval, nested timers
+- **Promises** (9) - resolve, reject, chains, Promise.all, Promise.race
+- **Fetch** (7) - GET/POST, headers, body, status codes
+- **Worker/Task** (5) - Event handlers, request/response
+- **URL** (3) - URL parsing, URLSearchParams
+- **Integration** (3) - Complex scenarios, Date.now(), Math
 
 **Total: 42 tests** ✅
 
-All tests validate:
-- Async execution with Tokio
-- Proper callback timing
-- Clean shutdown behavior
-- Error handling and edge cases
+## Supported JavaScript APIs
 
-## Comparison with openworkers-runtime (Deno)
+### Timers
+- `setTimeout(callback, delay)`
+- `setInterval(callback, interval)`
+- `clearTimeout(id)`
+- `clearInterval(id)`
 
-| Aspect | Deno/V8 | JSCore |
-|--------|---------|---------|
-| Binary size | ~50MB | ~5MB (estimated) |
-| Snapshots | Yes | No (for now) |
-| Extensions | deno_* | Custom |
-| Performance | Very fast | Fast |
-| Maturity | Production | Experimental |
+### Fetch API
+- `fetch(url, options)` - HTTP requests (GET, POST, PUT, DELETE, PATCH, HEAD)
+- Full Request/Response objects
+- Headers API (get, has, set, delete)
+- Promise-based with async/await
 
-## Next Steps
+### Promises
+- Native JavaScriptCore Promise support
+- `Promise.resolve()`, `Promise.reject()`
+- `Promise.all()`, `Promise.race()`
+- `.then()`, `.catch()`, `.finally()`
+- `queueMicrotask()`
 
-1. Implement setTimeout with Tokio timers
-2. Create a callback system to handle async results
-3. Implement fetch with reqwest
-4. Add event handlers (fetch, scheduled) for OpenWorkers compatibility
-5. Performance benchmarks vs Deno runtime
+### Other APIs
+- `console.log/warn/error/info/debug`
+- `URL` - Full URL parsing
+- `URLSearchParams` - Query string handling
+- `Response` - HTTP responses
+- `addEventListener` - Event handling
+- `Date.now()` - Timestamps
+- `Math.*` - Standard math operations
 
-## Technical Notes
+## Architecture
 
-### JSCore Limitations
+```
+src/
+├── lib.rs              # Public API
+├── worker.rs           # Worker with event handlers
+├── task.rs             # Task types (Fetch, Scheduled)
+├── compat.rs           # Compatibility layer
+└── runtime/
+    ├── mod.rs          # Runtime & event loop
+    ├── bindings.rs     # JavaScript bindings
+    ├── url.rs          # URL API implementation
+    └── fetch/          # Fetch API implementation
+        ├── mod.rs
+        ├── request.rs
+        ├── response.rs
+        └── headers.rs
+```
 
-- `JSContext` is not `Send`, so must stay on the main thread
-- No native snapshot support (unlike V8)
-- Need a callback architecture for async operations
+## Key Advantages
 
-### Advantages
+- **Fast after warmup** - Sub-millisecond worker creation
+- **Native Promises** - Built into JavaScriptCore
+- **Full URL API** - Complete URL and URLSearchParams implementation
+- **Native on macOS/iOS** - Zero-overhead on Apple platforms
 
-- Lighter runtime
-- Fewer dependencies
-- Native integration on macOS/iOS
-- Stable C API
+## Other Runtime Implementations
 
-## Dependencies
+OpenWorkers supports multiple JavaScript engines:
 
-- `rusty_jsc`: Rust bindings for JavaScriptCore
-- `tokio`: Async runtime
-- `futures`: Async primitives
+- **[openworkers-runtime](https://github.com/openworkers/openworkers-runtime)** - Deno-based (V8 + Deno extensions)
+- **[openworkers-runtime-jsc](https://github.com/openworkers/openworkers-runtime-jsc)** - This runtime (JavaScriptCore)
+- **[openworkers-runtime-boa](https://github.com/openworkers/openworkers-runtime-boa)** - Boa (100% Rust)
+- **[openworkers-runtime-v8](https://github.com/openworkers/openworkers-runtime-v8)** - V8 via rusty_v8
 
 ## License
 
-Same license as OpenWorkers
+MIT License - See LICENSE file.
+
+## Credits
+
+Built on JavaScriptCore via [rusty_jsc](https://github.com/rustjs/rust-jsc).

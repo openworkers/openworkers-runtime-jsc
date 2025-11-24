@@ -1,4 +1,4 @@
-use openworkers_runtime_jscore::{HttpRequest, Script, Task, Worker};
+use openworkers_runtime_jsc::{HttpRequest, Script, Task, Worker};
 use std::collections::HashMap;
 use std::time::Instant;
 
