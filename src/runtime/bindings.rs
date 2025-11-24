@@ -50,8 +50,32 @@ pub fn setup_console(context: &mut JSContext) {
     console_mut.set_property(context, "log", log_fn).unwrap();
 }
 
-/// Setup setTimeout binding
+/// Setup timer bindings (setTimeout, setInterval, clearTimeout, clearInterval)
 pub fn setup_timer(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    next_id: Arc<Mutex<CallbackId>>,
+    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
+) {
+    // Setup setTimeout
+    setup_set_timeout(context, scheduler_tx.clone(), callbacks.clone(), next_id.clone());
+
+    // Setup setInterval
+    setup_set_interval(
+        context,
+        scheduler_tx.clone(),
+        callbacks.clone(),
+        next_id.clone(),
+        intervals,
+    );
+
+    // Setup clearTimeout and clearInterval (same implementation)
+    setup_clear_timer(context, scheduler_tx.clone());
+}
+
+/// Setup setTimeout binding
+fn setup_set_timeout(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
@@ -109,5 +133,137 @@ pub fn setup_timer(
     let mut global = context.get_global_object();
     global
         .set_property(context, "setTimeout", set_timeout.into())
+        .unwrap();
+}
+
+/// Setup setInterval binding
+fn setup_set_interval(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    next_id: Arc<Mutex<CallbackId>>,
+    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
+) {
+    let callbacks_clone = callbacks;
+    let next_id_clone = next_id;
+    let scheduler_tx_clone = scheduler_tx;
+    let intervals_clone = intervals;
+
+    // Create setInterval function
+    let set_interval = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 2 {
+                return Err(JSValue::string(&ctx, "setInterval requires 2 arguments"));
+            }
+
+            // Get the callback function
+            let callback = match args[0].to_object(&ctx) {
+                Ok(obj) => obj,
+                Err(_) => return Err(JSValue::string(&ctx, "First argument must be a function")),
+            };
+
+            // Get the interval
+            let interval = match args[1].to_number(&ctx) {
+                Ok(d) => d as u64,
+                Err(_) => return Err(JSValue::string(&ctx, "Second argument must be a number")),
+            };
+
+            // Generate callback ID
+            let callback_id = {
+                let mut next = next_id_clone.lock().unwrap();
+                let id = *next;
+                *next += 1;
+                id
+            };
+
+            // Store the callback
+            {
+                let mut cbs = callbacks_clone.lock().unwrap();
+                cbs.insert(callback_id, callback);
+            }
+
+            // Mark as interval
+            {
+                let mut intervals = intervals_clone.lock().unwrap();
+                intervals.insert(callback_id);
+            }
+
+            // Schedule the interval
+            let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleInterval(callback_id, interval));
+
+            log::debug!("setInterval: registered callback {} with interval {}ms", callback_id, interval);
+
+            // Return the interval ID
+            Ok(JSValue::number(&ctx, callback_id as f64))
+        }
+    );
+
+    // Add setInterval to global object
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "setInterval", set_interval.into())
+        .unwrap();
+}
+
+/// Setup clearTimeout and clearInterval bindings (same implementation for both)
+fn setup_clear_timer(context: &mut JSContext, scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>) {
+    let scheduler_tx_clone = scheduler_tx.clone();
+
+    // Create clearTimeout function
+    let clear_timeout = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.is_empty() {
+                return Ok(JSValue::undefined(&ctx));
+            }
+
+            // Get the timer ID
+            let timer_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as u64,
+                Err(_) => return Ok(JSValue::undefined(&ctx)),
+            };
+
+            // Send clear message
+            let _ = scheduler_tx_clone.send(SchedulerMessage::ClearTimer(timer_id));
+
+            log::debug!("clearTimeout: cleared timer {}", timer_id);
+
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    let scheduler_tx_clone2 = scheduler_tx;
+
+    // Create clearInterval function (same implementation)
+    let clear_interval = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.is_empty() {
+                return Ok(JSValue::undefined(&ctx));
+            }
+
+            // Get the timer ID
+            let timer_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as u64,
+                Err(_) => return Ok(JSValue::undefined(&ctx)),
+            };
+
+            // Send clear message
+            let _ = scheduler_tx_clone2.send(SchedulerMessage::ClearTimer(timer_id));
+
+            log::debug!("clearInterval: cleared timer {}", timer_id);
+
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    // Add to global object
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "clearTimeout", clear_timeout.into())
+        .unwrap();
+    global
+        .set_property(context, "clearInterval", clear_interval.into())
         .unwrap();
 }

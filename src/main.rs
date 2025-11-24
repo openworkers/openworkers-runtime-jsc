@@ -16,26 +16,46 @@ async fn main() {
         run_event_loop(scheduler_rx, callback_tx).await;
     });
 
-    // Execute JavaScript with setTimeout
+    // Execute JavaScript with all timer functions
     let script = r#"
-        console.log("Starting setTimeout test...");
+        console.log("=== Testing all timer functions ===");
 
         const start = +Date.now();
-        const diff = () => `+${(+Date.now()) - start}`;
+        const diff = () => `+${(+Date.now()) - start}ms`;
 
+        // Test 1: setTimeout
+        console.log("\n1. Testing setTimeout...");
         setTimeout(() => {
-            console.log("Timeout 1: This should print after 100ms", diff());
-        }, 100);
-
-        setTimeout(() => {
-            console.log("Timeout 2: This should print after 500ms", diff());
-        }, 500);
-
-        setTimeout(() => {
-            console.log("Timeout 3: This should print after 200ms", diff());
+            console.log("  setTimeout fired after 200ms", diff());
         }, 200);
 
-        console.log("All timeouts scheduled!");
+        // Test 2: setInterval
+        console.log("\n2. Testing setInterval...");
+        let count = 0;
+        const intervalId = setInterval(() => {
+            count++;
+            console.log("  setInterval tick", count, diff());
+            if (count >= 3) {
+                clearInterval(intervalId);
+                console.log("  Interval cleared after 3 ticks");
+            }
+        }, 150);
+
+        // Test 3: clearTimeout
+        console.log("\n3. Testing clearTimeout...");
+        const timeoutId = setTimeout(() => {
+            console.log("  This should NOT print (cleared)");
+        }, 100);
+        clearTimeout(timeoutId);
+        console.log("  Timeout cleared immediately");
+
+        // Test 4: Multiple timers
+        console.log("\n4. Testing multiple timers...");
+        setTimeout(() => console.log("  Timer A", diff()), 300);
+        setTimeout(() => console.log("  Timer B", diff()), 100);
+        setTimeout(() => console.log("  Timer C", diff()), 400);
+
+        console.log("\n=== All timers scheduled! ===\n");
     "#;
 
     match runtime.evaluate(script) {
@@ -52,7 +72,6 @@ async fn main() {
     }
 
     // Process callbacks for 1 second
-    log::info!("Processing callbacks...");
     for _ in 0..20 {
         runtime.process_callbacks();
         tokio::time::sleep(Duration::from_millis(50)).await;

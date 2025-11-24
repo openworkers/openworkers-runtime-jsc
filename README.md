@@ -31,8 +31,8 @@ src/
 - [x] console.log
 - [x] Event loop architecture with Tokio
 - [x] setTimeout (with proper async execution)
-- [ ] setInterval
-- [ ] clearTimeout/clearInterval
+- [x] setInterval (repeating timers)
+- [x] clearTimeout/clearInterval (cancel timers)
 - [ ] fetch API
 - [ ] Event handlers (fetch, scheduled)
 
@@ -55,9 +55,20 @@ async fn main() {
     let script = r#"
         console.log("Hello from JavaScriptCore!");
 
+        // setTimeout example
         setTimeout(() => {
             console.log("This runs after 100ms!");
         }, 100);
+
+        // setInterval example
+        let count = 0;
+        const intervalId = setInterval(() => {
+            count++;
+            console.log("Interval tick", count);
+            if (count >= 3) {
+                clearInterval(intervalId);
+            }
+        }, 200);
     "#;
 
     runtime.evaluate(script).unwrap();
