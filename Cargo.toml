@@ -1,6 +1,28 @@
 [package]
 name = "openworkers-runtime-jscore"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+# JSCore runtime (using local fork)
+rusty_jsc = { path = "/Users/max/Documents/forks/rusty_jsc" }
+rusty_jsc_macros = { path = "/Users/max/Documents/forks/rusty_jsc/macros" }
+
+# Async runtime
+tokio = { version = "1.43", features = ["full"] }
+futures = "0.3"
+
+# Signal handling (for timeouts and graceful termination)
+signal-hook = "0.3"
+signal-hook-tokio = { version = "0.3", features = ["futures-v0_3"] }
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# HTTP
+bytes = { version = "1.11", features = ["serde"] }
