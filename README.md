@@ -30,28 +30,42 @@ src/
 - [x] Basic JavaScriptCore context
 - [x] console.log
 - [x] Event loop architecture with Tokio
-- [ ] setTimeout/setInterval
+- [x] setTimeout (with proper async execution)
+- [ ] setInterval
+- [ ] clearTimeout/clearInterval
 - [ ] fetch API
 - [ ] Event handlers (fetch, scheduled)
 
 ## Usage
 
+### Basic Example
+
 ```rust
-use openworkers_runtime_jscore::Runtime;
+use openworkers_runtime_jscore::{run_event_loop, Runtime};
 
 #[tokio::main]
 async fn main() {
-    let mut runtime = Runtime::new();
+    let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+
+    // Spawn background event loop
+    let event_loop = tokio::spawn(async move {
+        run_event_loop(scheduler_rx, callback_tx).await;
+    });
 
     let script = r#"
         console.log("Hello from JavaScriptCore!");
-        const result = 2 + 2;
-        console.log("2 + 2 =", result);
+
+        setTimeout(() => {
+            console.log("This runs after 100ms!");
+        }, 100);
     "#;
 
-    match runtime.evaluate(script) {
-        Ok(_) => println!("Script executed successfully"),
-        Err(e) => eprintln!("Error: {:?}", e),
+    runtime.evaluate(script).unwrap();
+
+    // Process callbacks
+    for _ in 0..10 {
+        runtime.process_callbacks();
+        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
     }
 }
 ```

@@ -1,27 +1,44 @@
-// Example: Timer implementation (conceptual)
-// This shows how we could implement setTimeout with JSCore + Tokio
+// Example: setTimeout with JSCore + Tokio
 //
 // To run: cargo run --example timer
 
-use openworkers_runtime_jscore::Runtime;
+use openworkers_runtime_jscore::{run_event_loop, Runtime};
+use std::time::Duration;
 
 #[tokio::main]
 async fn main() {
     env_logger::init();
 
-    let mut runtime = Runtime::new();
+    log::info!("Starting timer example with setTimeout");
 
-    // Basic hello world
+    // Create runtime and event loop
+    let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+
+    // Spawn the background event loop
+    let event_loop_handle = tokio::spawn(async move {
+        run_event_loop(scheduler_rx, callback_tx).await;
+    });
+
+    // Execute JavaScript with setTimeout
     let script = r#"
         console.log("Starting timer example...");
 
-        // This is what we want to support in the future:
-        // setTimeout(() => {
-        //     console.log("Timer fired after 1000ms!");
-        // }, 1000);
+        const start = +Date.now();
+        const diff = () => `+${(+Date.now()) - start}ms`;
 
-        console.log("For now, we only have synchronous console.log");
-        console.log("But the architecture is ready for async operations!");
+        setTimeout(() => {
+            console.log("Timer 1 fired after 1000ms", diff());
+        }, 1000);
+
+        setTimeout(() => {
+            console.log("Timer 2 fired after 300ms", diff());
+        }, 300);
+
+        setTimeout(() => {
+            console.log("Timer 3 fired after 2000ms", diff());
+        }, 2000);
+
+        console.log("All timers scheduled!");
     "#;
 
     match runtime.evaluate(script) {
@@ -35,8 +52,18 @@ async fn main() {
         }
     }
 
-    // Here we could run the event loop to process async tasks:
-    // runtime.run_event_loop().await;
+    // Process callbacks for 3 seconds
+    log::info!("Processing callbacks...");
+    for _ in 0..60 {
+        runtime.process_callbacks();
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
 
     log::info!("Timer example completed");
+
+    // Cleanup: runtime will be dropped, sending shutdown message
+    drop(runtime);
+
+    // Wait for event loop to finish
+    let _ = tokio::time::timeout(Duration::from_secs(1), event_loop_handle).await;
 }

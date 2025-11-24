@@ -1,68 +1,105 @@
 pub mod bindings;
 
-use rusty_jsc::{JSContext, JSValue};
-use std::future::Future;
-use std::pin::Pin;
+use rusty_jsc::{JSContext, JSObject, JSValue};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
+use std::time::Duration;
 use tokio::sync::mpsc;
 
-/// Type for async JS callbacks
-pub type JsFuture = Pin<Box<dyn Future<Output = Result<JSValue, String>> + Send>>;
+/// Unique ID for callbacks
+pub type CallbackId = u64;
 
-/// Message sent from JS to the event loop
-pub enum EventLoopMessage {
-    /// Execute an async task
-    ExecuteTask(JsFuture),
+/// Message sent from JS to schedule async operations
+pub enum SchedulerMessage {
+    /// Schedule a timeout: (callback_id, delay_ms)
+    ScheduleTimeout(CallbackId, u64),
     /// Shutdown the event loop
     Shutdown,
+}
+
+/// Message sent back from the event loop to execute callbacks
+pub enum CallbackMessage {
+    /// Execute a timeout callback
+    ExecuteTimeout(CallbackId),
 }
 
 /// Runtime that manages JSContext and tokio event loop
 pub struct Runtime {
     /// JavaScript context
     pub context: JSContext,
-    /// Channel to send messages to the event loop
-    pub event_tx: mpsc::UnboundedSender<EventLoopMessage>,
-    /// Channel to receive messages from the event loop
-    event_rx: Arc<Mutex<mpsc::UnboundedReceiver<EventLoopMessage>>>,
+    /// Channel to send scheduler messages to the event loop
+    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    /// Channel to receive callback messages from the event loop
+    pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
+    /// Stored callbacks (callback_id -> JSObject function) - shared with bindings
+    pub(crate) callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    /// Next callback ID - shared with bindings
+    #[allow(dead_code)]
+    pub(crate) next_callback_id: Arc<Mutex<CallbackId>>,
 }
 
 impl Runtime {
-    pub fn new() -> Self {
-        let (event_tx, event_rx) = mpsc::unbounded_channel();
+    pub fn new() -> (
+        Self,
+        mpsc::UnboundedReceiver<SchedulerMessage>,
+        mpsc::UnboundedSender<CallbackMessage>,
+    ) {
+        let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
+        let (callback_tx, callback_rx) = mpsc::unbounded_channel();
+
+        let callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>> =
+            Arc::new(Mutex::new(HashMap::new()));
+        let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
 
         let mut context = JSContext::default();
 
         // Setup console.log
         bindings::setup_console(&mut context);
 
-        Self {
+        // Setup setTimeout (pass shared state)
+        bindings::setup_timer(
+            &mut context,
+            scheduler_tx.clone(),
+            callbacks.clone(),
+            next_callback_id.clone(),
+        );
+
+        let runtime = Self {
             context,
-            event_tx,
-            event_rx: Arc::new(Mutex::new(event_rx)),
-        }
+            scheduler_tx,
+            callback_rx,
+            callbacks,
+            next_callback_id,
+        };
+
+        (runtime, scheduler_rx, callback_tx)
     }
 
-    /// Run the event loop until all tasks are completed
-    pub async fn run_event_loop(&mut self) {
-        let mut rx = self.event_rx.lock().unwrap();
-
-        while let Some(msg) = rx.recv().await {
+    /// Process pending callbacks (non-blocking)
+    pub fn process_callbacks(&mut self) {
+        while let Ok(msg) = self.callback_rx.try_recv() {
             match msg {
-                EventLoopMessage::ExecuteTask(fut) => {
-                    // Execute the future
-                    match fut.await {
-                        Ok(_result) => {
-                            log::debug!("Task completed successfully");
-                        }
-                        Err(e) => {
-                            log::error!("Task failed: {}", e);
+                CallbackMessage::ExecuteTimeout(callback_id) => {
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Executing timeout callback {}", callback_id);
+
+                        // Call the callback
+                        match callback.call_as_function(&self.context, None, &[]) {
+                            Ok(_) => log::debug!("Callback {} executed successfully", callback_id),
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Callback {} failed: {}", callback_id, err_str);
+                                } else {
+                                    log::error!("Callback {} failed with unknown error", callback_id);
+                                }
+                            }
                         }
                     }
-                }
-                EventLoopMessage::Shutdown => {
-                    log::info!("Shutting down event loop");
-                    break;
                 }
             }
         }
@@ -74,9 +111,35 @@ impl Runtime {
     }
 }
 
+/// Background event loop that handles scheduled tasks
+pub async fn run_event_loop(
+    mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
+    callback_tx: mpsc::UnboundedSender<CallbackMessage>,
+) {
+    log::info!("Event loop started");
+
+    while let Some(msg) = scheduler_rx.recv().await {
+        match msg {
+            SchedulerMessage::ScheduleTimeout(callback_id, delay_ms) => {
+                log::debug!("Scheduling timeout {} with delay {}ms", callback_id, delay_ms);
+
+                let callback_tx = callback_tx.clone();
+                tokio::spawn(async move {
+                    tokio::time::sleep(Duration::from_millis(delay_ms)).await;
+                    let _ = callback_tx.send(CallbackMessage::ExecuteTimeout(callback_id));
+                });
+            }
+            SchedulerMessage::Shutdown => {
+                log::info!("Shutting down event loop");
+                break;
+            }
+        }
+    }
+}
+
 impl Drop for Runtime {
     fn drop(&mut self) {
         // Send shutdown message
-        let _ = self.event_tx.send(EventLoopMessage::Shutdown);
+        let _ = self.scheduler_tx.send(SchedulerMessage::Shutdown);
     }
 }

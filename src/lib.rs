@@ -1,3 +1,3 @@
 pub mod runtime;
 
-pub use runtime::Runtime;
+pub use runtime::{run_event_loop, Runtime};
