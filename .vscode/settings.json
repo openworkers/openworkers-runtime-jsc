@@ -2,6 +2,7 @@
   "cSpell.words": [
     "actix",
     "jscore",
+    "microtask",
     "openworkers",
     "reqwest",
     "rustls",

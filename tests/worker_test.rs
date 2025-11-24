@@ -79,6 +79,67 @@ async fn test_worker_json_response() {
 }
 
 #[tokio::test]
+async fn test_worker_response_headers() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const response = new Response('Hello with headers!', {
+                status: 201,
+                headers: {
+                    'Content-Type': 'text/plain',
+                    'X-Custom-Header': 'custom-value',
+                    'X-Worker-Id': 'test-worker-123'
+                }
+            });
+            event.respondWith(response);
+        });
+    "#;
+
+    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let mut worker = Worker::new(script_obj, None, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: "GET".to_string(),
+        url: "/test".to_string(),
+        headers: HashMap::new(),
+        body: None,
+    };
+
+    let (task, _rx) = Task::fetch(request);
+    let response = worker.exec_http(task).await.expect("Task should execute");
+
+    assert_eq!(response.status, 201, "Should return 201 status");
+
+    // Check headers are present
+    assert!(!response.headers.is_empty(), "Should have headers");
+
+    // Check specific headers
+    let headers_map: HashMap<String, String> = response.headers.into_iter().collect();
+    assert_eq!(
+        headers_map.get("Content-Type"),
+        Some(&"text/plain".to_string()),
+        "Should have Content-Type header"
+    );
+    assert_eq!(
+        headers_map.get("X-Custom-Header"),
+        Some(&"custom-value".to_string()),
+        "Should have custom header"
+    );
+    assert_eq!(
+        headers_map.get("X-Worker-Id"),
+        Some(&"test-worker-123".to_string()),
+        "Should have worker id header"
+    );
+
+    // Check body
+    if let Some(body) = response.body {
+        let body_str = String::from_utf8(body.to_vec()).unwrap();
+        assert_eq!(body_str, "Hello with headers!");
+    }
+}
+
+#[tokio::test]
 async fn test_worker_access_request_data() {
     let script = r#"
         addEventListener('fetch', (event) => {
@@ -134,15 +195,17 @@ async fn test_worker_no_handler_error() {
     let (task, _rx) = Task::fetch(request);
     let result = worker.exec_http(task).await;
 
-    // Should error or return a fallback response
-    // For now, we accept both behaviors since the addEventListener setup
-    // might provide a default handler
-    if result.is_ok() {
-        println!("Worker returned OK even without handler (acceptable)");
-    } else if let Err(e) = result {
+    // Should error when no handler is registered
+    // Either immediate error or timeout waiting for response
+    assert!(result.is_err(), "Should error when no handler registered");
+
+    if let Err(e) = result {
         assert!(
-            e.contains("No fetch handler") || e.contains("not a function"),
-            "Error should mention missing handler, got: {}",
+            e.contains("No fetch handler")
+                || e.contains("not a function")
+                || e.contains("timeout")
+                || e.contains("Response timeout"),
+            "Error should mention missing handler or timeout, got: {}",
             e
         );
     }

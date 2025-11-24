@@ -36,7 +36,7 @@ impl Worker {
         let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
 
         // Setup addEventListener binding
-        setup_event_listener(&mut runtime.context);
+        setup_event_listener(&mut runtime.context, runtime.fetch_response_tx.clone());
 
         // TODO: Apply environment variables from script.env
         // TODO: Apply runtime limits
@@ -147,27 +147,57 @@ impl Worker {
             .evaluate_script(&request_script, 1)
             .map_err(|_| "Failed to create Request object")?;
 
+        // Create a oneshot channel for the response
+        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<String>();
+
+        // Store the sender in runtime so JS can use it
+        {
+            let mut tx_lock = self.runtime.fetch_response_tx.lock().unwrap();
+            *tx_lock = Some(response_tx);
+        }
+
         // Call the fetch event trigger (set by addEventListener)
         let trigger_script = r#"
             (async function(request) {
                 if (typeof globalThis.__triggerFetch === 'function') {
                     const response = await globalThis.__triggerFetch(request);
-                    // Store response data for extraction
+                    // Extract response data
                     if (response && response.text) {
                         const bodyText = await response.text();
-                        globalThis.__lastResponse = {
+
+                        // Extract headers
+                        const headers = [];
+                        if (response.headers) {
+                            if (typeof response.headers === 'object') {
+                                for (const [key, value] of Object.entries(response.headers)) {
+                                    headers.push([key, String(value)]);
+                                }
+                            }
+                        }
+
+                        const responseData = {
                             status: response.status || 200,
                             statusText: response.statusText || 'OK',
+                            headers: headers,
                             body: bodyText
                         };
+                        // Send to Rust via native function
+                        if (typeof globalThis.__sendFetchResponse === 'function') {
+                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
+                        }
+                        return responseData;
                     } else {
-                        globalThis.__lastResponse = {
+                        const responseData = {
                             status: 200,
                             statusText: 'OK',
+                            headers: [],
                             body: String(response)
                         };
+                        if (typeof globalThis.__sendFetchResponse === 'function') {
+                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
+                        }
+                        return responseData;
                     }
-                    return globalThis.__lastResponse;
                 }
                 throw new Error("No fetch handler registered");
             })
@@ -205,43 +235,38 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Process callbacks to resolve promises
-        for _ in 0..100 {
-            self.runtime.process_callbacks();
-            tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+        // Wait for response from JS (sent via __sendFetchResponse)
+        // Process callbacks in background while waiting
+        let response_json = tokio::select! {
+            result = response_rx => {
+                result.map_err(|_| "Response channel closed - handler may not have called respondWith")?
+            }
+            _ = async {
+                // Process callbacks in a loop to allow promises to resolve
+                for _ in 0..200 {
+                    self.runtime.process_callbacks();
+                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+                }
+            } => {
+                return Err("Response timeout: no response after 200ms".to_string());
+            }
+        };
+
+        // Parse the JSON response
+        #[derive(serde::Deserialize)]
+        struct ResponseData {
+            status: u16,
+            headers: Vec<(String, String)>,
+            body: String,
         }
 
-        // Extract response from globalThis.__lastResponse
-        let get_response = r#"globalThis.__lastResponse"#;
-        let response_val = self
-            .runtime
-            .context
-            .evaluate_script(get_response, 1)
-            .map_err(|_| "Failed to get response")?;
+        let response_data: ResponseData = serde_json::from_str(&response_json)
+            .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
 
-        let response = if let Ok(resp_obj) = response_val.to_object(&self.runtime.context) {
-            let status = resp_obj
-                .get_property(&self.runtime.context, "status")
-                .and_then(|v| v.to_number(&self.runtime.context).ok())
-                .unwrap_or(200.0) as u16;
-
-            let body_str = resp_obj
-                .get_property(&self.runtime.context, "body")
-                .and_then(|v| v.to_js_string(&self.runtime.context).ok())
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-
-            HttpResponse {
-                status,
-                headers: vec![],
-                body: Some(Bytes::from(body_str)),
-            }
-        } else {
-            HttpResponse {
-                status: 500,
-                headers: vec![],
-                body: Some(Bytes::from("Failed to extract response")),
-            }
+        let response = HttpResponse {
+            status: response_data.status,
+            headers: response_data.headers,
+            body: Some(Bytes::from(response_data.body)),
         };
 
         // Send response back
@@ -307,10 +332,10 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Process callbacks
-        for _ in 0..10 {
+        // Process callbacks - just give it a few cycles to finish
+        for _ in 0..20 {
             self.runtime.process_callbacks();
-            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
         }
 
         // Send completion
@@ -328,7 +353,46 @@ impl Drop for Worker {
 }
 
 /// Setup addEventListener binding
-fn setup_event_listener(context: &mut rusty_jsc::JSContext) {
+fn setup_event_listener(
+    context: &mut rusty_jsc::JSContext,
+    fetch_response_tx: std::sync::Arc<
+        std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
+    >,
+) {
+    // Setup native __sendFetchResponse function
+    let fetch_tx_clone = fetch_response_tx.clone();
+    let send_response_callback = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: rusty_jsc::JSContext,
+              _function: rusty_jsc::JSObject,
+              _this: rusty_jsc::JSObject,
+              args: &[rusty_jsc::JSValue]| {
+            if args.is_empty() {
+                return Ok(rusty_jsc::JSValue::undefined(&ctx));
+            }
+
+            if let Ok(response_json) = args[0].to_js_string(&ctx) {
+                let response_str = response_json.to_string();
+
+                // Send the response through the channel
+                if let Some(tx) = fetch_tx_clone.lock().unwrap().take() {
+                    let _ = tx.send(response_str);
+                }
+            }
+
+            Ok(rusty_jsc::JSValue::undefined(&ctx))
+        }
+    );
+
+    context
+        .get_global_object()
+        .set_property(
+            context,
+            "__sendFetchResponse",
+            send_response_callback.into(),
+        )
+        .unwrap();
+
     let add_event_listener_script = r#"
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {

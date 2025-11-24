@@ -59,6 +59,8 @@ pub struct Runtime {
     pub(crate) next_callback_id: Arc<Mutex<CallbackId>>,
     /// Track which callbacks are intervals (vs timeouts) - shared with bindings
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
+    /// Sender for fetch response (set during fetch execution)
+    pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 }
 
 impl Runtime {
@@ -75,6 +77,8 @@ impl Runtime {
         let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
         let intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
+        let fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>> =
+            Arc::new(Mutex::new(None));
 
         let mut context = JSContext::default();
 
@@ -111,6 +115,7 @@ impl Runtime {
             callbacks,
             next_callback_id,
             intervals,
+            fetch_response_tx,
         };
 
         (runtime, scheduler_rx, callback_tx)
