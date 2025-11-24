@@ -1,10 +1,14 @@
 pub mod bindings;
+pub mod fetch;
 
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
+
+// Re-export fetch types for external use
+pub use fetch::{FetchRequest, FetchResponse};
 
 /// Unique ID for callbacks
 pub type CallbackId = u64;
@@ -17,6 +21,8 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     /// Clear a timer (timeout or interval): (callback_id)
     ClearTimer(CallbackId),
+    /// Fetch a URL: (promise_id, request)
+    Fetch(CallbackId, FetchRequest),
     /// Shutdown the event loop
     Shutdown,
 }
@@ -31,6 +37,10 @@ pub enum CallbackMessage {
     ExecutePromiseResolve(CallbackId, String),
     /// Execute a Promise reject callback with error
     ExecutePromiseReject(CallbackId, String),
+    /// Resolve a fetch Promise with response
+    FetchSuccess(CallbackId, FetchResponse),
+    /// Reject a fetch Promise with error
+    FetchError(CallbackId, String),
 }
 
 /// Runtime that manages JSContext and tokio event loop
@@ -72,6 +82,14 @@ impl Runtime {
 
         // Setup queueMicrotask
         bindings::setup_microtask(&mut context);
+
+        // Setup fetch API
+        bindings::setup_fetch(
+            &mut context,
+            scheduler_tx.clone(),
+            callbacks.clone(),
+            next_callback_id.clone(),
+        );
 
         // Setup timer bindings (pass shared state)
         bindings::setup_timer(
@@ -180,6 +198,62 @@ impl Runtime {
                         }
                     }
                 }
+                CallbackMessage::FetchSuccess(callback_id, response) => {
+                    // Execute fetch resolve callback with Response object
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Resolving fetch promise {}", callback_id);
+
+                        // Create Response object using the dedicated module
+                        match fetch::response::create_response_object(&mut self.context, response) {
+                            Ok(response_obj) => {
+                                match callback.call_as_function(
+                                    &self.context,
+                                    None,
+                                    &[response_obj],
+                                ) {
+                                    Ok(_) => log::debug!("Fetch promise resolved successfully"),
+                                    Err(e) => {
+                                        if let Ok(err_str) = e.to_js_string(&self.context) {
+                                            log::error!(
+                                                "Fetch resolve callback failed: {}",
+                                                err_str
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                log::error!("Failed to create Response object: {}", e);
+                            }
+                        }
+                    }
+                }
+                CallbackMessage::FetchError(callback_id, error_msg) => {
+                    // Execute fetch reject callback
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Rejecting fetch promise {}: {}", callback_id, error_msg);
+
+                        let error_val = JSValue::string(&self.context, error_msg.as_str());
+                        match callback.call_as_function(&self.context, None, &[error_val]) {
+                            Ok(_) => log::debug!("Fetch promise rejected successfully"),
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Fetch reject callback failed: {}", err_str);
+                                }
+                            }
+                        }
+                    }
+                }
                 CallbackMessage::ExecuteInterval(callback_id) => {
                     // Intervals keep the callback for repeated execution
                     let callback_opt = {
@@ -283,6 +357,23 @@ pub async fn run_event_loop(
                 });
 
                 running_tasks.insert(callback_id, handle);
+            }
+            SchedulerMessage::Fetch(promise_id, request) => {
+                log::debug!("Fetching {} {}", request.method.as_str(), request.url);
+
+                let callback_tx = callback_tx.clone();
+                tokio::spawn(async move {
+                    // Execute the fetch request
+                    match fetch::request::execute_fetch(request).await {
+                        Ok(response) => {
+                            let _ = callback_tx
+                                .send(CallbackMessage::FetchSuccess(promise_id, response));
+                        }
+                        Err(e) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
+                        }
+                    }
+                });
             }
             SchedulerMessage::ClearTimer(callback_id) => {
                 log::debug!("Clearing timer {}", callback_id);

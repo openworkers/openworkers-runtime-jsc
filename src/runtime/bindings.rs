@@ -99,6 +99,106 @@ pub fn setup_microtask(context: &mut JSContext) {
         .unwrap();
 }
 
+/// Setup fetch API
+pub fn setup_fetch(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    next_id: Arc<Mutex<CallbackId>>,
+) {
+    let scheduler_tx_clone = scheduler_tx;
+    let callbacks_clone = callbacks;
+    let next_id_clone = next_id;
+
+    // Create fetch function
+    let fetch_fn = rusty_jsc::callback_closure!(
+        context,
+        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.is_empty() {
+                return Err(JSValue::string(&ctx, "fetch requires a URL"));
+            }
+
+            // Get URL
+            let url = match args[0].to_js_string(&ctx) {
+                Ok(url_str) => url_str.to_string(),
+                Err(_) => return Err(JSValue::string(&ctx, "URL must be a string")),
+            };
+
+            // Parse fetch options (method, headers, body)
+            let options_val = if args.len() > 1 {
+                Some(args[1].clone())
+            } else {
+                None
+            };
+
+            let request = match super::fetch::request::parse_fetch_options(&ctx, url, options_val) {
+                Ok(req) => req,
+                Err(e) => return Err(JSValue::string(&ctx, e.as_str())),
+            };
+
+            // Create a Promise and store resolve/reject callbacks
+            let promise_script = r#"
+                new Promise((resolve, reject) => {
+                    globalThis.__fetchResolve = resolve;
+                    globalThis.__fetchReject = reject;
+                })
+            "#;
+
+            let promise = match ctx.evaluate_script(promise_script, 1) {
+                Ok(p) => p,
+                Err(_) => return Err(JSValue::string(&ctx, "Failed to create Promise")),
+            };
+
+            // Get resolve and reject callbacks
+            let global = ctx.get_global_object();
+
+            let resolve_callback = global
+                .get_property(&ctx, "__fetchResolve")
+                .and_then(|v| v.to_object(&ctx).ok())
+                .ok_or_else(|| JSValue::string(&ctx, "Failed to get resolve callback"))?;
+
+            let _reject_callback = global
+                .get_property(&ctx, "__fetchReject")
+                .and_then(|v| v.to_object(&ctx).ok())
+                .ok_or_else(|| JSValue::string(&ctx, "Failed to get reject callback"))?;
+
+            // Generate callback ID for resolve
+            let callback_id = {
+                let mut next = next_id_clone.lock().unwrap();
+                let id = *next;
+                *next += 1;
+                id
+            };
+
+            // Store resolve callback (we'll call it with Response or Error)
+            {
+                let mut cbs = callbacks_clone.lock().unwrap();
+                cbs.insert(callback_id, resolve_callback);
+                // For reject, we could store it separately, but for now we'll use the same callback
+            }
+
+            // Schedule the fetch
+            let _ = scheduler_tx_clone.send(SchedulerMessage::Fetch(callback_id, request.clone()));
+
+            log::debug!(
+                "fetch: scheduled {} {} (promise_id: {})",
+                request.method.as_str(),
+                request.url,
+                callback_id
+            );
+
+            // Return the Promise
+            Ok(promise)
+        }
+    );
+
+    // Add fetch to global object
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "fetch", fetch_fn.into())
+        .unwrap();
+}
+
 /// Setup timer bindings (setTimeout, setInterval, clearTimeout, clearInterval)
 pub fn setup_timer(
     context: &mut JSContext,

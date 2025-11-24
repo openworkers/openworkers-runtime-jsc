@@ -33,7 +33,9 @@ src/
 - [x] **Timers**: setTimeout, setInterval, clearTimeout, clearInterval
 - [x] **Promises**: Native JSCore Promise support (resolve, reject, then, catch, all, race)
 - [x] **Microtasks**: queueMicrotask API
-- [ ] fetch API
+- [x] **fetch API**: HTTP requests with reqwest (GET, POST, PUT, DELETE)
+  - Response object with status, ok, text(), json()
+  - Promise-based async API
 - [ ] Event handlers (fetch, scheduled)
 
 ## Usage
@@ -102,9 +104,10 @@ cargo test
 | **Error Handling** | 4 | Syntax errors, undefined variables, callback errors |
 | **Timers** | 7 | setTimeout, setInterval, clear functions, execution order, nested timers |
 | **Promises** | 9 | resolve, reject, chains, constructor, Promise.all, Promise.race, queueMicrotask |
+| **Fetch** | 7 | GET/POST, text(), json(), headers, body, status codes |
 | **Integration** | 3 | Comprehensive scenarios, Date.now(), Math operations |
 
-**Total: 27 tests** ✅
+**Total: 34 tests** ✅
 
 All tests validate:
 - Async execution with Tokio
