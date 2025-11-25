@@ -6,7 +6,7 @@ pub mod worker;
 
 // Core API
 pub use runtime::{Runtime, run_event_loop};
-pub use task::{HttpRequest, HttpResponse, Task, TaskType};
+pub use task::{HttpRequest, HttpResponse, ResponseBody, Task, TaskType};
 pub use worker::Worker;
 
 // Compatibility exports (matching openworkers-runtime)

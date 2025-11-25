@@ -104,7 +104,7 @@ impl Worker {
                 Ok(HttpResponse {
                     status: 200,
                     headers: vec![],
-                    body: None,
+                    body: crate::task::ResponseBody::None,
                 })
             }
         }
@@ -276,16 +276,18 @@ impl Worker {
         let response_data: ResponseData = serde_json::from_str(&response_json)
             .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
 
-        let response = HttpResponse {
+        // Send response back
+        let _ = fetch_init.res_tx.send(HttpResponse {
+            status: response_data.status,
+            headers: response_data.headers.clone(),
+            body: crate::task::ResponseBody::Bytes(Bytes::from(response_data.body.clone())),
+        });
+
+        Ok(HttpResponse {
             status: response_data.status,
             headers: response_data.headers,
-            body: Some(Bytes::from(response_data.body)),
-        };
-
-        // Send response back
-        let _ = fetch_init.res_tx.send(response.clone());
-
-        Ok(response)
+            body: crate::task::ResponseBody::Bytes(Bytes::from(response_data.body)),
+        })
     }
 
     async fn trigger_scheduled_event(

@@ -1102,7 +1102,7 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openworkers-runtime-jsc"
-version = "0.2.0"
+version = "0.3.0"
 dependencies = [
  "actix-web",
  "bytes",
@@ -1117,6 +1117,7 @@ dependencies = [
  "signal-hook",
  "signal-hook-tokio",
  "tokio",
+ "tokio-stream",
 ]
 
 [[package]]
@@ -1823,6 +1824,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1729aa945f29d91ba541258c8df89027d5792d85a8841fb65e8bf0f4ede4ef61"
 dependencies = [
  "rustls",
+ "tokio",
+]
+
+[[package]]
+name = "tokio-stream"
+version = "0.1.17"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "eca58d7bba4a75707817a2c44174253f9236b2d5fbd055602e9d5c07c139a047"
+dependencies = [
+ "futures-core",
+ "pin-project-lite",
  "tokio",
 ]
 
