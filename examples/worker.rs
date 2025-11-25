@@ -3,7 +3,7 @@
 // To run: cargo run --example worker
 
 use bytes::Bytes;
-use openworkers_runtime_jscore::{HttpRequest, Task, Worker};
+use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Task, Worker};
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -59,7 +59,7 @@ async fn main() {
     "#;
 
     // Create worker
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should load");
@@ -76,7 +76,7 @@ async fn main() {
     let response1 = worker.exec_http(task1).await.expect("Task should execute");
 
     println!("Status: {}", response1.status);
-    if let Some(body) = response1.body {
+    if let ResponseBody::Bytes(body) = response1.body {
         println!("Body: {}", String::from_utf8_lossy(&body));
     }
 
@@ -92,7 +92,7 @@ async fn main() {
     let response2 = worker.exec_http(task2).await.expect("Task should execute");
 
     println!("Status: {}", response2.status);
-    if let Some(body) = response2.body {
+    if let ResponseBody::Bytes(body) = response2.body {
         println!("Body: {}", String::from_utf8_lossy(&body));
     }
 
@@ -108,7 +108,7 @@ async fn main() {
     let response3 = worker.exec_http(task3).await.expect("Task should execute");
 
     println!("Status: {}", response3.status);
-    if let Some(body) = response3.body {
+    if let ResponseBody::Bytes(body) = response3.body {
         println!("Body: {}", String::from_utf8_lossy(&body));
     }
 

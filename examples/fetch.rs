@@ -2,7 +2,7 @@
 //
 // To run: cargo run --example fetch
 
-use openworkers_runtime_jscore::{Runtime, run_event_loop};
+use openworkers_runtime_jsc::{Runtime, run_event_loop};
 use std::time::Duration;
 
 #[tokio::main]

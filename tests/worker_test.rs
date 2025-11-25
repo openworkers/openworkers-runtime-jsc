@@ -1,5 +1,5 @@
 use bytes::Bytes;
-use openworkers_runtime_jscore::{HttpRequest, Task, Worker};
+use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Task, Worker};
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -11,7 +11,7 @@ async fn test_worker_basic_fetch_handler() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
@@ -30,9 +30,9 @@ async fn test_worker_basic_fetch_handler() {
     let response = worker.exec_http(task).await.expect("Task should execute");
 
     assert_eq!(response.status, 200, "Should return 200 status");
-    assert!(response.body.is_some(), "Should have response body");
+    assert!(!response.body.is_none(), "Should have response body");
 
-    if let Some(body) = response.body {
+    if let ResponseBody::Bytes(body) = response.body {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(
             body_str.contains("Hello"),
@@ -54,7 +54,7 @@ async fn test_worker_json_response() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
@@ -71,7 +71,7 @@ async fn test_worker_json_response() {
 
     assert_eq!(response.status, 200);
 
-    if let Some(body) = response.body {
+    if let ResponseBody::Bytes(body) = response.body {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("success"));
         assert!(body_str.contains("42"));
@@ -94,7 +94,7 @@ async fn test_worker_response_headers() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
@@ -133,7 +133,7 @@ async fn test_worker_response_headers() {
     );
 
     // Check body
-    if let Some(body) = response.body {
+    if let ResponseBody::Bytes(body) = response.body {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert_eq!(body_str, "Hello with headers!");
     }
@@ -151,7 +151,7 @@ async fn test_worker_access_request_data() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
@@ -166,7 +166,7 @@ async fn test_worker_access_request_data() {
     let (task, _rx) = Task::fetch(request);
     let response = worker.exec_http(task).await.expect("Task should execute");
 
-    if let Some(body) = response.body {
+    if let ResponseBody::Bytes(body) = response.body {
         let body_str = String::from_utf8(body.to_vec()).unwrap();
         assert!(body_str.contains("POST"), "Should include method");
         assert!(body_str.contains("/api/create"), "Should include URL");
@@ -180,7 +180,7 @@ async fn test_worker_no_handler_error() {
         console.log("Worker loaded without handler");
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should load");
@@ -222,7 +222,7 @@ async fn test_worker_scheduled_event() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jscore::Script::new(script);
+    let script_obj = openworkers_runtime_jsc::Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
