@@ -229,8 +229,8 @@ impl Worker {
             }
         }
 
-        // Extract response data from __lastResponse using JS
-        // This extracts status, headers, _nativeStreamId, and body bytes in one call
+        // Extract response metadata from __lastResponse
+        // Also call _getRawBody() and store result in __lastResponse._bodyBytes for direct access
         let extract_script = r#"
             (function() {
                 const resp = globalThis.__lastResponse;
@@ -260,29 +260,23 @@ impl Worker {
                         status: resp.status || 200,
                         headers: headers,
                         nativeStreamId: nativeStreamId,
-                        bodyBase64: null
+                        hasBody: false
                     });
                 }
 
                 // Buffered response - extract body using _getRawBody()
-                let bodyBase64 = '';
+                // Store directly on the response object for Rust access
                 if (resp._getRawBody) {
-                    const bodyBytes = resp._getRawBody();
-                    if (bodyBytes && bodyBytes.length > 0) {
-                        // Convert Uint8Array to base64
-                        let binary = '';
-                        for (let i = 0; i < bodyBytes.length; i++) {
-                            binary += String.fromCharCode(bodyBytes[i]);
-                        }
-                        bodyBase64 = btoa(binary);
-                    }
+                    resp._bodyBytes = resp._getRawBody();
+                } else {
+                    resp._bodyBytes = new Uint8Array(0);
                 }
 
                 return JSON.stringify({
                     status: resp.status || 200,
                     headers: headers,
                     nativeStreamId: null,
-                    bodyBase64: bodyBase64
+                    hasBody: resp._bodyBytes && resp._bodyBytes.length > 0
                 });
             })()
         "#;
@@ -298,15 +292,15 @@ impl Worker {
             .map_err(|_| "Failed to get response JSON")?
             .to_string();
 
-        // Parse the extracted data
+        // Parse the extracted metadata
         #[derive(serde::Deserialize)]
         struct ExtractedResponse {
             status: u16,
             headers: Vec<(String, String)>,
             #[serde(rename = "nativeStreamId")]
             native_stream_id: Option<u64>,
-            #[serde(rename = "bodyBase64")]
-            body_base64: Option<String>,
+            #[serde(rename = "hasBody")]
+            has_body: bool,
         }
 
         let extracted: ExtractedResponse = serde_json::from_str(&json_str)
@@ -348,49 +342,80 @@ impl Worker {
 
             ResponseBody::Stream(rx)
         } else {
-            // Buffered body - decode from base64
-            let body_bytes = if let Some(b64) = &extracted.body_base64 {
-                if b64.is_empty() {
-                    Bytes::new()
+            // Buffered body - read directly from __lastResponse._bodyBytes via TypedArray API
+            let body_bytes = if extracted.has_body {
+                // Get __lastResponse from global
+                let global = self.runtime.context.get_global_object();
+                if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse") {
+                    if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
+                        // Get _bodyBytes property
+                        if let Some(body_val) = resp_obj.get_property(&self.runtime.context, "_bodyBytes") {
+                            if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
+                                // Use get_typed_array_buffer to read bytes directly
+                                // Safety: we read synchronously and copy the data immediately
+                                unsafe {
+                                    if let Ok(slice) = body_obj.get_typed_array_buffer(&self.runtime.context) {
+                                        Bytes::copy_from_slice(slice)
+                                    } else {
+                                        Bytes::new()
+                                    }
+                                }
+                            } else {
+                                Bytes::new()
+                            }
+                        } else {
+                            Bytes::new()
+                        }
+                    } else {
+                        Bytes::new()
+                    }
                 } else {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64)
-                        .map(Bytes::from)
-                        .unwrap_or_else(|_| Bytes::new())
+                    Bytes::new()
                 }
             } else {
                 Bytes::new()
             };
-            ResponseBody::Bytes(body_bytes)
+            ResponseBody::Bytes(body_bytes.clone())
         };
 
-        // Send response back
+        // Send response back via channel
         let _ = fetch_init.res_tx.send(HttpResponse {
             status: extracted.status,
             headers: extracted.headers.clone(),
             body,
         });
 
-        // Return a new response (for exec_http which returns HttpResponse)
+        // Return response for exec_http
         let return_body = if extracted.native_stream_id.is_some() {
             ResponseBody::None
-        } else {
-            // Decode again for the return value
-            let body_bytes = if let Some(b64) = &extracted.body_base64 {
-                if b64.is_empty() {
-                    Bytes::new()
+        } else if extracted.has_body {
+            // Re-read from __lastResponse._bodyBytes
+            let global = self.runtime.context.get_global_object();
+            if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse") {
+                if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
+                    if let Some(body_val) = resp_obj.get_property(&self.runtime.context, "_bodyBytes") {
+                        if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
+                            unsafe {
+                                if let Ok(slice) = body_obj.get_typed_array_buffer(&self.runtime.context) {
+                                    ResponseBody::Bytes(Bytes::copy_from_slice(slice))
+                                } else {
+                                    ResponseBody::Bytes(Bytes::new())
+                                }
+                            }
+                        } else {
+                            ResponseBody::Bytes(Bytes::new())
+                        }
+                    } else {
+                        ResponseBody::Bytes(Bytes::new())
+                    }
                 } else {
-                    use base64::Engine;
-                    base64::engine::general_purpose::STANDARD
-                        .decode(b64)
-                        .map(Bytes::from)
-                        .unwrap_or_else(|_| Bytes::new())
+                    ResponseBody::Bytes(Bytes::new())
                 }
             } else {
-                Bytes::new()
-            };
-            ResponseBody::Bytes(body_bytes)
+                ResponseBody::Bytes(Bytes::new())
+            }
+        } else {
+            ResponseBody::Bytes(Bytes::new())
         };
 
         Ok(HttpResponse {
