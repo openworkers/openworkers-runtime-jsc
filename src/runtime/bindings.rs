@@ -177,11 +177,14 @@ pub fn setup_fetch(
                 // For reject, we could store it separately, but for now we'll use the same callback
             }
 
-            // Schedule the fetch
-            let _ = scheduler_tx_clone.send(SchedulerMessage::Fetch(callback_id, request.clone()));
+            // Schedule the fetch with streaming
+            let _ = scheduler_tx_clone.send(SchedulerMessage::FetchStreaming(
+                callback_id,
+                request.clone(),
+            ));
 
             log::debug!(
-                "fetch: scheduled {} {} (promise_id: {})",
+                "fetch: scheduled streaming {} {} (promise_id: {})",
                 request.method.as_str(),
                 request.url,
                 callback_id

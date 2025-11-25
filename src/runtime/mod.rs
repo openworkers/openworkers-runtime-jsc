@@ -355,7 +355,7 @@ impl Runtime {
                     }
                 }
                 CallbackMessage::FetchStreamingSuccess(callback_id, meta) => {
-                    // Execute fetch resolve callback with metadata object
+                    // Execute fetch resolve callback with a full Response object
                     let callback_opt = {
                         let mut cbs = self.callbacks.lock().unwrap();
                         cbs.remove(&callback_id)
@@ -368,22 +368,31 @@ impl Runtime {
                             meta.stream_id
                         );
 
-                        // Create meta object: {status, statusText, headers, streamId}
+                        // Create a Response with streaming body using __createNativeStream
                         let headers_json =
                             serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
-                        let meta_script = format!(
-                            r#"({{
-                                status: {},
-                                statusText: "{}",
-                                headers: {},
-                                streamId: {}
-                            }})"#,
-                            meta.status, meta.status_text, headers_json, meta.stream_id
+                        let response_script = format!(
+                            r#"(function() {{
+                                const stream = __createNativeStream({});
+                                const response = new Response(stream, {{
+                                    status: {},
+                                    statusText: "{}",
+                                    headers: {}
+                                }});
+                                // Mark as streaming response
+                                response._isStreaming = true;
+                                return response;
+                            }})()"#,
+                            meta.stream_id, meta.status, meta.status_text, headers_json
                         );
 
-                        match self.context.evaluate_script(&meta_script, 1) {
-                            Ok(meta_obj) => {
-                                match callback.call_as_function(&self.context, None, &[meta_obj]) {
+                        match self.context.evaluate_script(&response_script, 1) {
+                            Ok(response_obj) => {
+                                match callback.call_as_function(
+                                    &self.context,
+                                    None,
+                                    &[response_obj],
+                                ) {
                                     Ok(_) => log::debug!("Fetch streaming resolved successfully"),
                                     Err(e) => {
                                         if let Ok(err_str) = e.to_js_string(&self.context) {
@@ -397,7 +406,7 @@ impl Runtime {
                             }
                             Err(e) => {
                                 if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Failed to create meta object: {}", err_str);
+                                    log::error!("Failed to create streaming Response: {}", err_str);
                                 }
                             }
                         }
