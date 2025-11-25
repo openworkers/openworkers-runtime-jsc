@@ -235,20 +235,33 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Wait for response from JS (sent via __sendFetchResponse)
-        // Process callbacks in background while waiting
+        // Wait for response with adaptive polling (like V8 runtime)
+        // Fast polling for sync responses, slower for async operations
         let response_json = tokio::select! {
             result = response_rx => {
                 result.map_err(|_| "Response channel closed - handler may not have called respondWith")?
             }
             _ = async {
-                // Process callbacks in a loop to allow promises to resolve
-                for _ in 0..200 {
+                // Adaptive polling: fast checks first, then slower
+                for iteration in 0..5000 {
                     self.runtime.process_callbacks();
-                    tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+                    // Adaptive sleep: fast for first checks, slower later
+                    let sleep_duration = if iteration < 10 {
+                        // First 10 iterations: minimal sleep (for immediate sync responses)
+                        tokio::time::Duration::from_micros(1)
+                    } else if iteration < 100 {
+                        // Next 90 iterations: 1ms sleep (for fast async < 100ms)
+                        tokio::time::Duration::from_millis(1)
+                    } else {
+                        // After 100ms: 10ms sleep (for slow operations)
+                        tokio::time::Duration::from_millis(10)
+                    };
+
+                    tokio::time::sleep(sleep_duration).await;
                 }
             } => {
-                return Err("Response timeout: no response after 200ms".to_string());
+                return Err("Response timeout: no response after 5s".to_string());
             }
         };
 
@@ -332,10 +345,20 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Process callbacks - just give it a few cycles to finish
-        for _ in 0..20 {
+        // Process callbacks with adaptive polling
+        for iteration in 0..100 {
             self.runtime.process_callbacks();
-            tokio::time::sleep(std::time::Duration::from_millis(1)).await;
+
+            // Adaptive sleep
+            let sleep_duration = if iteration < 10 {
+                tokio::time::Duration::from_micros(1)
+            } else if iteration < 50 {
+                tokio::time::Duration::from_millis(1)
+            } else {
+                tokio::time::Duration::from_millis(10)
+            };
+
+            tokio::time::sleep(sleep_duration).await;
         }
 
         // Send completion
