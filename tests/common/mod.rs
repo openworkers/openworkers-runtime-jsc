@@ -12,11 +12,11 @@ pub struct TestRunner {
 
 impl TestRunner {
     pub fn new() -> Self {
-        let (runtime, scheduler_rx, callback_tx) = Runtime::new();
+        let (runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
         // Spawn event loop
         let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx).await;
+            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
         });
 
         Self {

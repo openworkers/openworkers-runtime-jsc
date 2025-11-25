@@ -1,4 +1,4 @@
-use super::{CallbackId, SchedulerMessage};
+use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
 use std::collections::HashMap;
@@ -432,4 +432,134 @@ fn setup_clear_timer(
     global
         .set_property(context, "clearInterval", clear_interval.into())
         .unwrap();
+}
+
+/// Setup stream operations for native streaming (__nativeStreamRead, __nativeStreamCancel)
+pub fn setup_stream_ops(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    next_id: Arc<Mutex<CallbackId>>,
+) {
+    // Create __nativeStreamRead(stream_id, resolve_callback)
+    // This is called from JS to request the next chunk from a stream
+    let scheduler_tx_clone = scheduler_tx.clone();
+    let callbacks_clone = callbacks.clone();
+    let next_id_clone = next_id.clone();
+
+    let stream_read = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 2 {
+                return Err(JSValue::string(
+                    &ctx,
+                    "__nativeStreamRead requires stream_id and callback",
+                ));
+            }
+
+            // Get stream ID
+            let stream_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as StreamId,
+                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
+            };
+
+            // Get callback function
+            let callback = match args[1].to_object(&ctx) {
+                Ok(obj) => obj,
+                Err(_) => return Err(JSValue::string(&ctx, "callback must be a function")),
+            };
+
+            // Generate callback ID
+            let callback_id = {
+                let mut next = next_id_clone.lock().unwrap();
+                let id = *next;
+                *next += 1;
+                id
+            };
+
+            // Store callback
+            {
+                let mut cbs = callbacks_clone.lock().unwrap();
+                cbs.insert(callback_id, callback);
+            }
+
+            // Send StreamRead message to scheduler
+            let _ = scheduler_tx_clone.send(SchedulerMessage::StreamRead(callback_id, stream_id));
+
+            log::debug!(
+                "__nativeStreamRead: reading stream {} (callback {})",
+                stream_id,
+                callback_id
+            );
+
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    // Create __nativeStreamCancel(stream_id) - sends cancel message to scheduler
+    let scheduler_tx_clone2 = scheduler_tx;
+
+    let stream_cancel = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.is_empty() {
+                return Err(JSValue::string(
+                    &ctx,
+                    "__nativeStreamCancel requires stream_id",
+                ));
+            }
+
+            // Get stream ID
+            let stream_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as StreamId,
+                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
+            };
+
+            // Send StreamCancel message
+            let _ = scheduler_tx_clone2.send(SchedulerMessage::StreamCancel(stream_id));
+
+            log::debug!("__nativeStreamCancel: cancelled stream {}", stream_id);
+
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    // Add to global object
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "__nativeStreamRead", stream_read.into())
+        .unwrap();
+    global
+        .set_property(context, "__nativeStreamCancel", stream_cancel.into())
+        .unwrap();
+
+    // Create JS helper __createNativeStream(streamId) that creates a ReadableStream
+    // pulling from native Rust code
+    let create_native_stream_script = r#"
+        globalThis.__createNativeStream = function(streamId) {
+            return new ReadableStream({
+                pull(controller) {
+                    return new Promise((resolve) => {
+                        __nativeStreamRead(streamId, (result) => {
+                            if (result.error) {
+                                controller.error(new Error(result.error));
+                            } else if (result.done) {
+                                controller.close();
+                            } else {
+                                controller.enqueue(result.value);
+                            }
+                            resolve();
+                        });
+                    });
+                },
+                cancel() {
+                    __nativeStreamCancel(streamId);
+                }
+            });
+        };
+    "#;
+
+    context
+        .evaluate_script(create_native_stream_script, 1)
+        .expect("Failed to setup __createNativeStream");
 }

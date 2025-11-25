@@ -3,6 +3,7 @@ pub mod bindings;
 pub mod fetch;
 mod headers;
 mod response;
+pub mod stream_manager;
 mod streams;
 mod text_encoding;
 mod url;
@@ -29,8 +30,23 @@ pub enum SchedulerMessage {
     ClearTimer(CallbackId),
     /// Fetch a URL: (promise_id, request)
     Fetch(CallbackId, FetchRequest),
+    /// Fetch with streaming response: (promise_id, request)
+    FetchStreaming(CallbackId, FetchRequest),
+    /// Read next chunk from stream: (callback_id, stream_id)
+    StreamRead(CallbackId, stream_manager::StreamId),
+    /// Cancel/close a stream
+    StreamCancel(stream_manager::StreamId),
     /// Shutdown the event loop
     Shutdown,
+}
+
+/// Metadata for streaming fetch response (status, headers, stream ID)
+#[derive(Debug, Clone)]
+pub struct FetchResponseMeta {
+    pub status: u16,
+    pub status_text: String,
+    pub headers: std::collections::HashMap<String, String>,
+    pub stream_id: stream_manager::StreamId,
 }
 
 /// Message sent back from the event loop to execute callbacks
@@ -47,6 +63,10 @@ pub enum CallbackMessage {
     FetchSuccess(CallbackId, FetchResponse),
     /// Reject a fetch Promise with error
     FetchError(CallbackId, String),
+    /// Fetch streaming success: metadata + stream ID
+    FetchStreamingSuccess(CallbackId, FetchResponseMeta),
+    /// Stream chunk ready
+    StreamChunk(CallbackId, stream_manager::StreamChunk),
 }
 
 /// Runtime that manages JSContext and tokio event loop
@@ -66,6 +86,9 @@ pub struct Runtime {
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
     /// Sender for fetch response (set during fetch execution)
     pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// Stream manager for handling streaming responses
+    #[allow(dead_code)]
+    pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
 }
 
 impl Runtime {
@@ -73,6 +96,7 @@ impl Runtime {
         Self,
         mpsc::UnboundedReceiver<SchedulerMessage>,
         mpsc::UnboundedSender<CallbackMessage>,
+        Arc<stream_manager::StreamManager>,
     ) {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
@@ -84,6 +108,7 @@ impl Runtime {
             Arc::new(Mutex::new(std::collections::HashSet::new()));
         let fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>> =
             Arc::new(Mutex::new(None));
+        let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         let mut context = JSContext::default();
 
@@ -128,6 +153,14 @@ impl Runtime {
             intervals.clone(),
         );
 
+        // Setup stream operations for native streaming
+        bindings::setup_stream_ops(
+            &mut context,
+            scheduler_tx.clone(),
+            callbacks.clone(),
+            next_callback_id.clone(),
+        );
+
         let runtime = Self {
             context,
             scheduler_tx,
@@ -136,9 +169,10 @@ impl Runtime {
             next_callback_id,
             intervals,
             fetch_response_tx,
+            stream_manager: stream_manager.clone(),
         };
 
-        (runtime, scheduler_rx, callback_tx)
+        (runtime, scheduler_rx, callback_tx, stream_manager)
     }
 
     /// Clear a timer (remove from callbacks and intervals)
@@ -320,6 +354,110 @@ impl Runtime {
                         }
                     }
                 }
+                CallbackMessage::FetchStreamingSuccess(callback_id, meta) => {
+                    // Execute fetch resolve callback with metadata object
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!(
+                            "Resolving fetch streaming promise {} with stream {}",
+                            callback_id,
+                            meta.stream_id
+                        );
+
+                        // Create meta object: {status, statusText, headers, streamId}
+                        let headers_json =
+                            serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
+                        let meta_script = format!(
+                            r#"({{
+                                status: {},
+                                statusText: "{}",
+                                headers: {},
+                                streamId: {}
+                            }})"#,
+                            meta.status, meta.status_text, headers_json, meta.stream_id
+                        );
+
+                        match self.context.evaluate_script(&meta_script, 1) {
+                            Ok(meta_obj) => {
+                                match callback.call_as_function(&self.context, None, &[meta_obj]) {
+                                    Ok(_) => log::debug!("Fetch streaming resolved successfully"),
+                                    Err(e) => {
+                                        if let Ok(err_str) = e.to_js_string(&self.context) {
+                                            log::error!(
+                                                "Fetch streaming callback failed: {}",
+                                                err_str
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Failed to create meta object: {}", err_str);
+                                }
+                            }
+                        }
+                    }
+                }
+                CallbackMessage::StreamChunk(callback_id, chunk) => {
+                    // Execute stream read callback with chunk result
+                    let callback_opt = {
+                        let mut cbs = self.callbacks.lock().unwrap();
+                        cbs.remove(&callback_id)
+                    };
+
+                    if let Some(callback) = callback_opt {
+                        log::debug!("Executing stream chunk callback {}", callback_id);
+
+                        // Create result object based on chunk type
+                        let result_script = match chunk {
+                            stream_manager::StreamChunk::Data(bytes) => {
+                                // Convert bytes to Uint8Array
+                                let bytes_array: Vec<u8> = bytes.to_vec();
+                                let bytes_str = format!("{:?}", bytes_array);
+                                format!(
+                                    r#"({{
+                                        done: false,
+                                        value: new Uint8Array({})
+                                    }})"#,
+                                    bytes_str
+                                )
+                            }
+                            stream_manager::StreamChunk::Done => {
+                                r#"({ done: true, value: undefined })"#.to_string()
+                            }
+                            stream_manager::StreamChunk::Error(err) => {
+                                format!(r#"({{ error: "{}" }})"#, err.replace('"', "\\\""))
+                            }
+                        };
+
+                        match self.context.evaluate_script(&result_script, 1) {
+                            Ok(result_obj) => {
+                                match callback.call_as_function(&self.context, None, &[result_obj])
+                                {
+                                    Ok(_) => log::debug!("Stream chunk callback executed"),
+                                    Err(e) => {
+                                        if let Ok(err_str) = e.to_js_string(&self.context) {
+                                            log::error!(
+                                                "Stream chunk callback failed: {}",
+                                                err_str
+                                            );
+                                        }
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Ok(err_str) = e.to_js_string(&self.context) {
+                                    log::error!("Failed to create stream result: {}", err_str);
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -334,6 +472,7 @@ impl Runtime {
 pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
+    stream_manager: Arc<stream_manager::StreamManager>,
 ) {
     use std::collections::HashMap;
     use tokio::task::JoinHandle;
@@ -403,6 +542,44 @@ pub async fn run_event_loop(
                         }
                     }
                 });
+            }
+            SchedulerMessage::FetchStreaming(promise_id, request) => {
+                log::debug!(
+                    "Fetching streaming {} {}",
+                    request.method.as_str(),
+                    request.url
+                );
+
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                tokio::spawn(async move {
+                    match fetch::request::execute_fetch_streaming(request, manager).await {
+                        Ok(meta) => {
+                            let _ = callback_tx
+                                .send(CallbackMessage::FetchStreamingSuccess(promise_id, meta));
+                        }
+                        Err(e) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
+                        }
+                    }
+                });
+            }
+            SchedulerMessage::StreamRead(callback_id, stream_id) => {
+                log::debug!("Reading stream {} for callback {}", stream_id, callback_id);
+
+                let callback_tx = callback_tx.clone();
+                let manager = stream_manager.clone();
+                tokio::spawn(async move {
+                    let chunk = match manager.read_chunk(stream_id).await {
+                        Ok(chunk) => chunk,
+                        Err(e) => stream_manager::StreamChunk::Error(e),
+                    };
+                    let _ = callback_tx.send(CallbackMessage::StreamChunk(callback_id, chunk));
+                });
+            }
+            SchedulerMessage::StreamCancel(stream_id) => {
+                log::debug!("Cancelling stream {}", stream_id);
+                stream_manager.close_stream(stream_id);
             }
             SchedulerMessage::ClearTimer(callback_id) => {
                 log::debug!("Clearing timer {}", callback_id);

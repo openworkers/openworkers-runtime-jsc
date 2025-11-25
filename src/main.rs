@@ -9,11 +9,11 @@ async fn main() {
     log::info!("OpenWorkers JSCore Runtime with setTimeout");
 
     // Create runtime and event loop
-    let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+    let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
     // Spawn the background event loop
     let event_loop_handle = tokio::spawn(async move {
-        run_event_loop(scheduler_rx, callback_tx).await;
+        run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
     });
 
     // Execute JavaScript with all timer functions

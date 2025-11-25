@@ -33,7 +33,7 @@ impl Worker {
         _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
         _limits: Option<crate::compat::RuntimeLimits>,
     ) -> Result<Self, String> {
-        let (mut runtime, scheduler_rx, callback_tx) = Runtime::new();
+        let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
         // Setup addEventListener binding
         setup_event_listener(&mut runtime.context, runtime.fetch_response_tx.clone());
@@ -53,7 +53,7 @@ impl Worker {
 
         // Start event loop in background
         let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx).await;
+            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
         });
 
         Ok(Self {
