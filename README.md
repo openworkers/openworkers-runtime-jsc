@@ -23,25 +23,25 @@ cargo run --example benchmark --release
 ### Results (Apple Silicon, Release Mode)
 
 ```
-Worker::new(): avg=8ms* (500µs after warmup), min=452µs, max=41ms
-exec():        avg=400µs, min=411µs, max=469µs
-Total:         avg=900µs, min=868µs, max=44ms
+Worker::new(): avg=620µs* (495µs after warmup), min=495µs, max=41ms
+exec():        avg=478µs, min=434µs, max=542µs
+Total:         avg=1.09ms, min=935µs, max=44ms
 ```
 
-*First iteration has ~41ms warmup, subsequent runs are ~500µs
+*First iteration has ~40ms warmup, subsequent runs stabilize at 495µs
 
 ### Runtime Comparison
 
 | Runtime | Engine | Worker::new() | exec() | Total | Language |
 |---------|--------|---------------|--------|-------|----------|
-| **[V8](https://github.com/openworkers/openworkers-runtime-v8)** | V8 | 1.9ms | **96µs** ⚡ | 2.0ms | Rust + C++ |
-| **[JSC](https://github.com/openworkers/openworkers-runtime-jsc)** | JavaScriptCore | 0.5ms* | 400µs | **0.9ms** 🏆 | Rust + C |
-| **[Boa](https://github.com/openworkers/openworkers-runtime-boa)** | Boa | 1.1ms | 610µs | 1.7ms | 100% Rust |
-| **[Deno](https://github.com/openworkers/openworkers-runtime)** | V8 + Deno | 21.9ms | 774µs | 22.7ms | Rust + C++ |
+| **[V8](https://github.com/openworkers/openworkers-runtime-v8)** | V8 | 2.9ms | **15µs** ⚡ | ~3ms | Rust + C++ |
+| **[JSC](https://github.com/openworkers/openworkers-runtime-jsc)** | JavaScriptCore | 495µs* | 434µs | **935µs** 🏆 | Rust + C |
+| **[Boa](https://github.com/openworkers/openworkers-runtime-boa)** | Boa | 605µs | 441µs | 1.05ms | 100% Rust |
+| **[Deno](https://github.com/openworkers/openworkers-runtime)** | V8 + Deno | 4.6ms | 1.07ms | 5.8ms | Rust + C++ |
 
-*JSC has ~41ms warmup on first run, then stabilizes
+*JSC has ~40ms warmup on first run, then stabilizes
 
-**JSC has the fastest total time** after warmup, making it ideal for reusable workers.
+**JSC has the fastest total time** (935µs) after warmup, making it ideal for low-latency scenarios.
 
 ## Installation
 
