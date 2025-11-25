@@ -538,9 +538,10 @@ pub fn setup_stream_ops(
 
     // Create JS helper __createNativeStream(streamId) that creates a ReadableStream
     // pulling from native Rust code
+    // The stream is marked with _nativeStreamId so we can detect it later for forwarding
     let create_native_stream_script = r#"
         globalThis.__createNativeStream = function(streamId) {
-            return new ReadableStream({
+            const stream = new ReadableStream({
                 pull(controller) {
                     return new Promise((resolve) => {
                         __nativeStreamRead(streamId, (result) => {
@@ -559,6 +560,9 @@ pub fn setup_stream_ops(
                     __nativeStreamCancel(streamId);
                 }
             });
+            // Mark this stream as a native stream so we can forward it directly
+            stream._nativeStreamId = streamId;
+            return stream;
         };
     "#;
 

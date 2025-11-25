@@ -1,5 +1,5 @@
-use crate::runtime::{Runtime, run_event_loop};
-use crate::task::{HttpResponse, Task};
+use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
+use crate::task::{HttpResponse, ResponseBody, Task};
 use bytes::Bytes;
 
 /// Worker that executes JavaScript with event handlers
@@ -157,11 +157,44 @@ impl Worker {
         }
 
         // Call the fetch event trigger (set by addEventListener)
+        // Store the Response in __lastResponse for Rust to inspect
         let trigger_script = r#"
             (async function(request) {
                 if (typeof globalThis.__triggerFetch === 'function') {
                     const response = await globalThis.__triggerFetch(request);
-                    // Extract response data
+                    // Store response for Rust to extract
+                    globalThis.__lastResponse = response;
+
+                    // Check if this is a native stream forward (no buffering needed)
+                    if (response && response._nativeStreamId !== null && response._nativeStreamId !== undefined) {
+                        // Native stream forward - extract headers only, body will stream
+                        const headers = [];
+                        if (response.headers) {
+                            if (response.headers instanceof Headers) {
+                                for (const [key, value] of response.headers) {
+                                    headers.push([key, String(value)]);
+                                }
+                            } else if (typeof response.headers === 'object') {
+                                for (const [key, value] of Object.entries(response.headers)) {
+                                    headers.push([key, String(value)]);
+                                }
+                            }
+                        }
+
+                        const responseData = {
+                            status: response.status || 200,
+                            statusText: response.statusText || 'OK',
+                            headers: headers,
+                            body: '',  // Will be streamed
+                            _nativeStreamId: response._nativeStreamId
+                        };
+                        if (typeof globalThis.__sendFetchResponse === 'function') {
+                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
+                        }
+                        return responseData;
+                    }
+
+                    // Non-streaming response - buffer the body
                     if (response && response.text) {
                         const bodyText = await response.text();
 
@@ -277,22 +310,75 @@ impl Worker {
             status: u16,
             headers: Vec<(String, String)>,
             body: String,
+            #[serde(rename = "_nativeStreamId")]
+            native_stream_id: Option<u64>,
         }
 
         let response_data: ResponseData = serde_json::from_str(&response_json)
             .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
 
+        // Determine body type: streaming or buffered
+        let body = if let Some(stream_id) = response_data.native_stream_id {
+            // Native stream forward - create bounded channel for backpressure
+            const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
+
+            let (tx, rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
+            let stream_manager = self.runtime.stream_manager.clone();
+
+            // Spawn task to read from stream and forward to channel
+            // Backpressure: if channel is full, this task waits (slowing upstream)
+            tokio::spawn(async move {
+                loop {
+                    match stream_manager.read_chunk(stream_id).await {
+                        Ok(chunk) => match chunk {
+                            StreamChunk::Data(bytes) => {
+                                // send() is async and waits if buffer is full
+                                if tx.send(Ok(bytes)).await.is_err() {
+                                    break;
+                                }
+                            }
+                            StreamChunk::Done => {
+                                break;
+                            }
+                            StreamChunk::Error(e) => {
+                                let _ = tx.send(Err(e)).await;
+                                break;
+                            }
+                        },
+                        Err(e) => {
+                            let _ = tx.send(Err(e)).await;
+                            break;
+                        }
+                    }
+                }
+            });
+
+            ResponseBody::Stream(rx)
+        } else {
+            // Buffered body
+            ResponseBody::Bytes(Bytes::from(response_data.body.clone()))
+        };
+
         // Send response back
         let _ = fetch_init.res_tx.send(HttpResponse {
             status: response_data.status,
             headers: response_data.headers.clone(),
-            body: crate::task::ResponseBody::Bytes(Bytes::from(response_data.body.clone())),
+            body,
         });
+
+        // Return a new response (for exec_http which returns HttpResponse)
+        let return_body = if response_data.native_stream_id.is_some() {
+            // For streaming, we already sent the stream to res_tx
+            // Return empty body since the actual stream was forwarded
+            ResponseBody::None
+        } else {
+            ResponseBody::Bytes(Bytes::from(response_data.body))
+        };
 
         Ok(HttpResponse {
             status: response_data.status,
             headers: response_data.headers,
-            body: crate::task::ResponseBody::Bytes(Bytes::from(response_data.body)),
+            body: return_body,
         })
     }
 

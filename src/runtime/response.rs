@@ -10,6 +10,7 @@ pub fn setup_response(context: &mut JSContext) {
                 this.statusText = init.statusText || '';
                 this.ok = this.status >= 200 && this.status < 300;
                 this.bodyUsed = false;
+                this._nativeStreamId = null;  // Will be set if body is a native stream
 
                 // Convert headers to Headers instance if available
                 if (typeof Headers !== 'undefined') {
@@ -27,6 +28,10 @@ pub fn setup_response(context: &mut JSContext) {
                 if (body instanceof ReadableStream) {
                     // Already a stream - use it directly
                     this.body = body;
+                    // Check if this is a native stream (from fetch)
+                    if (body._nativeStreamId !== undefined) {
+                        this._nativeStreamId = body._nativeStreamId;
+                    }
                 } else if (body instanceof Uint8Array || body instanceof ArrayBuffer) {
                     // Binary data - wrap in a stream
                     const bytes = body instanceof Uint8Array ? body : new Uint8Array(body);
