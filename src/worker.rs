@@ -421,15 +421,50 @@ fn setup_event_listener(
     let add_event_listener_script = r#"
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
-                globalThis.__triggerFetch = function(request) {
+                globalThis.__triggerFetch = async function(request) {
+                    // Create event with Promise-based respondWith
+                    let resolveResponse;
+                    const responsePromise = new Promise(resolve => {
+                        resolveResponse = resolve;
+                    });
+
                     const event = {
                         request: request,
-                        respondWith: function(responsePromise) {
-                            this._response = responsePromise;
+                        _responded: false,
+                        respondWith: function(response) {
+                            if (this._responded) {
+                                throw new Error('respondWith already called');
+                            }
+                            this._responded = true;
+                            // Handle both Promise and direct Response
+                            Promise.resolve(response).then(resolveResponse);
                         }
                     };
-                    handler(event);
-                    return event._response || new Response("No response");
+
+                    // Call handler - may be sync or async
+                    const handlerResult = handler(event);
+
+                    // If handler returns a promise, wait for it
+                    if (handlerResult && typeof handlerResult.then === 'function') {
+                        await handlerResult;
+                    }
+
+                    // If respondWith wasn't called yet, wait a tick for microtasks
+                    if (!event._responded) {
+                        await Promise.resolve();
+                    }
+
+                    // If still no response after microtasks, wait a bit more
+                    if (!event._responded) {
+                        await new Promise(r => setTimeout(r, 0));
+                    }
+
+                    // Final check
+                    if (!event._responded) {
+                        return new Response("No response");
+                    }
+
+                    return responsePromise;
                 };
             } else if (type === 'scheduled') {
                 globalThis.__triggerScheduled = async function(event) {

@@ -1,5 +1,8 @@
+mod base64;
 pub mod bindings;
 pub mod fetch;
+mod streams;
+mod text_encoding;
 mod url;
 
 use rusty_jsc::{JSContext, JSObject, JSValue};
@@ -87,6 +90,15 @@ impl Runtime {
 
         // Setup queueMicrotask
         bindings::setup_microtask(&mut context);
+
+        // Setup TextEncoder/TextDecoder
+        text_encoding::setup_text_encoding(&mut context);
+
+        // Setup atob/btoa (depends on TextEncoder/TextDecoder)
+        base64::setup_base64(&mut context);
+
+        // Setup ReadableStream
+        streams::setup_readable_stream(&mut context);
 
         // Setup URL API
         url::setup_url_api(&mut context);
