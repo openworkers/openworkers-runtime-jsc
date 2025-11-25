@@ -2,6 +2,7 @@ mod base64;
 pub mod bindings;
 pub mod fetch;
 mod headers;
+mod request;
 mod response;
 pub mod stream_manager;
 mod streams;
@@ -132,6 +133,9 @@ impl Runtime {
 
         // Setup Response (uses ReadableStream and Headers)
         response::setup_response(&mut context);
+
+        // Setup Request (uses ReadableStream, Headers, TextEncoder)
+        request::setup_request(&mut context);
 
         // Setup URL API
         url::setup_url_api(&mut context);

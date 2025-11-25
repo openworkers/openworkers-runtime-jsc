@@ -346,15 +346,20 @@ impl Worker {
             let body_bytes = if extracted.has_body {
                 // Get __lastResponse from global
                 let global = self.runtime.context.get_global_object();
-                if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse") {
+                if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse")
+                {
                     if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
                         // Get _bodyBytes property
-                        if let Some(body_val) = resp_obj.get_property(&self.runtime.context, "_bodyBytes") {
+                        if let Some(body_val) =
+                            resp_obj.get_property(&self.runtime.context, "_bodyBytes")
+                        {
                             if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
                                 // Use get_typed_array_buffer to read bytes directly
                                 // Safety: we read synchronously and copy the data immediately
                                 unsafe {
-                                    if let Ok(slice) = body_obj.get_typed_array_buffer(&self.runtime.context) {
+                                    if let Ok(slice) =
+                                        body_obj.get_typed_array_buffer(&self.runtime.context)
+                                    {
                                         Bytes::copy_from_slice(slice)
                                     } else {
                                         Bytes::new()
@@ -393,10 +398,14 @@ impl Worker {
             let global = self.runtime.context.get_global_object();
             if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse") {
                 if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
-                    if let Some(body_val) = resp_obj.get_property(&self.runtime.context, "_bodyBytes") {
+                    if let Some(body_val) =
+                        resp_obj.get_property(&self.runtime.context, "_bodyBytes")
+                    {
                         if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
                             unsafe {
-                                if let Ok(slice) = body_obj.get_typed_array_buffer(&self.runtime.context) {
+                                if let Ok(slice) =
+                                    body_obj.get_typed_array_buffer(&self.runtime.context)
+                                {
                                     ResponseBody::Bytes(Bytes::copy_from_slice(slice))
                                 } else {
                                     ResponseBody::Bytes(Bytes::new())
