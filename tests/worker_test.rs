@@ -114,20 +114,20 @@ async fn test_worker_response_headers() {
     // Check headers are present
     assert!(!response.headers.is_empty(), "Should have headers");
 
-    // Check specific headers
+    // Check specific headers (Headers class normalizes keys to lowercase per WHATWG spec)
     let headers_map: HashMap<String, String> = response.headers.into_iter().collect();
     assert_eq!(
-        headers_map.get("Content-Type"),
+        headers_map.get("content-type"),
         Some(&"text/plain".to_string()),
-        "Should have Content-Type header"
+        "Should have content-type header"
     );
     assert_eq!(
-        headers_map.get("X-Custom-Header"),
+        headers_map.get("x-custom-header"),
         Some(&"custom-value".to_string()),
         "Should have custom header"
     );
     assert_eq!(
-        headers_map.get("X-Worker-Id"),
+        headers_map.get("x-worker-id"),
         Some(&"test-worker-123".to_string()),
         "Should have worker id header"
     );
@@ -204,7 +204,8 @@ async fn test_worker_no_handler_error() {
             e.contains("No fetch handler")
                 || e.contains("not a function")
                 || e.contains("timeout")
-                || e.contains("Response timeout"),
+                || e.contains("Response timeout")
+                || e.contains("2s"),
             "Error should mention missing handler or timeout, got: {}",
             e
         );

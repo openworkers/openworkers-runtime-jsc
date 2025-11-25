@@ -1,6 +1,8 @@
 mod base64;
 pub mod bindings;
 pub mod fetch;
+mod headers;
+mod response;
 mod streams;
 mod text_encoding;
 mod url;
@@ -99,6 +101,12 @@ impl Runtime {
 
         // Setup ReadableStream
         streams::setup_readable_stream(&mut context);
+
+        // Setup Headers (before Response)
+        headers::setup_headers(&mut context);
+
+        // Setup Response (uses ReadableStream and Headers)
+        response::setup_response(&mut context);
 
         // Setup URL API
         url::setup_url_api(&mut context);

@@ -168,7 +168,12 @@ impl Worker {
                         // Extract headers
                         const headers = [];
                         if (response.headers) {
-                            if (typeof response.headers === 'object') {
+                            // Headers class is iterable
+                            if (response.headers instanceof Headers) {
+                                for (const [key, value] of response.headers) {
+                                    headers.push([key, String(value)]);
+                                }
+                            } else if (typeof response.headers === 'object') {
                                 for (const [key, value] of Object.entries(response.headers)) {
                                     headers.push([key, String(value)]);
                                 }
@@ -235,33 +240,34 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Wait for response with adaptive polling (like V8 runtime)
-        // Fast polling for sync responses, slower for async operations
+        // Wait for response with adaptive polling
+        // Fast polling for sync responses, timeout after ~2s for unresponsive handlers
         let response_json = tokio::select! {
             result = response_rx => {
                 result.map_err(|_| "Response channel closed - handler may not have called respondWith")?
             }
             _ = async {
                 // Adaptive polling: fast checks first, then slower
-                for iteration in 0..5000 {
+                // Total timeout: 10 x 1µs + 100 x 1ms + 190 x 10ms = ~2s
+                for iteration in 0..300 {
                     self.runtime.process_callbacks();
 
                     // Adaptive sleep: fast for first checks, slower later
                     let sleep_duration = if iteration < 10 {
                         // First 10 iterations: minimal sleep (for immediate sync responses)
                         tokio::time::Duration::from_micros(1)
-                    } else if iteration < 100 {
-                        // Next 90 iterations: 1ms sleep (for fast async < 100ms)
+                    } else if iteration < 110 {
+                        // Next 100 iterations: 1ms sleep (for fast async < 100ms)
                         tokio::time::Duration::from_millis(1)
                     } else {
-                        // After 100ms: 10ms sleep (for slow operations)
+                        // After 110ms: 10ms sleep (for slow operations)
                         tokio::time::Duration::from_millis(10)
                     };
 
                     tokio::time::sleep(sleep_duration).await;
                 }
             } => {
-                return Err("Response timeout: no response after 5s".to_string());
+                return Err("Response timeout: no response after 2s".to_string());
             }
         };
 
@@ -482,17 +488,6 @@ fn setup_event_listener(
                     }
                 };
             }
-        };
-
-        globalThis.Response = function(body, init) {
-            init = init || {};
-            return {
-                status: init.status || 200,
-                statusText: init.statusText || 'OK',
-                headers: init.headers || {},
-                text: () => Promise.resolve(String(body)),
-                json: () => Promise.resolve(JSON.parse(String(body))),
-            };
         };
     "#;
 
