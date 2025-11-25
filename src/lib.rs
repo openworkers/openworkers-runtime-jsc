@@ -5,6 +5,7 @@ pub mod task;
 pub mod worker;
 
 // Core API
+pub use runtime::stream_manager::{StreamChunk, StreamManager};
 pub use runtime::{Runtime, run_event_loop};
 pub use task::{HttpRequest, HttpResponse, ResponseBody, Task, TaskType};
 pub use worker::Worker;
