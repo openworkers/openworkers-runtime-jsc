@@ -1302,6 +1302,7 @@ name = "openworkers-runtime-jsc"
 version = "0.3.0"
 dependencies = [
  "actix-web",
+ "base64",
  "bytes",
  "criterion",
  "env_logger",

@@ -147,97 +147,15 @@ impl Worker {
             .evaluate_script(&request_script, 1)
             .map_err(|_| "Failed to create Request object")?;
 
-        // Create a oneshot channel for the response
-        let (response_tx, response_rx) = tokio::sync::oneshot::channel::<String>();
-
-        // Store the sender in runtime so JS can use it
-        {
-            let mut tx_lock = self.runtime.fetch_response_tx.lock().unwrap();
-            *tx_lock = Some(response_tx);
-        }
-
         // Call the fetch event trigger (set by addEventListener)
-        // Store the Response in __lastResponse for Rust to inspect
+        // The Response is stored in __lastResponse by the event handler
         let trigger_script = r#"
-            (async function(request) {
+            (function(request) {
                 if (typeof globalThis.__triggerFetch === 'function') {
-                    const response = await globalThis.__triggerFetch(request);
-                    // Store response for Rust to extract
-                    globalThis.__lastResponse = response;
-
-                    // Check if this is a native stream forward (no buffering needed)
-                    if (response && response._nativeStreamId !== null && response._nativeStreamId !== undefined) {
-                        // Native stream forward - extract headers only, body will stream
-                        const headers = [];
-                        if (response.headers) {
-                            if (response.headers instanceof Headers) {
-                                for (const [key, value] of response.headers) {
-                                    headers.push([key, String(value)]);
-                                }
-                            } else if (typeof response.headers === 'object') {
-                                for (const [key, value] of Object.entries(response.headers)) {
-                                    headers.push([key, String(value)]);
-                                }
-                            }
-                        }
-
-                        const responseData = {
-                            status: response.status || 200,
-                            statusText: response.statusText || 'OK',
-                            headers: headers,
-                            body: '',  // Will be streamed
-                            _nativeStreamId: response._nativeStreamId
-                        };
-                        if (typeof globalThis.__sendFetchResponse === 'function') {
-                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
-                        }
-                        return responseData;
-                    }
-
-                    // Non-streaming response - buffer the body
-                    if (response && response.text) {
-                        const bodyText = await response.text();
-
-                        // Extract headers
-                        const headers = [];
-                        if (response.headers) {
-                            // Headers class is iterable
-                            if (response.headers instanceof Headers) {
-                                for (const [key, value] of response.headers) {
-                                    headers.push([key, String(value)]);
-                                }
-                            } else if (typeof response.headers === 'object') {
-                                for (const [key, value] of Object.entries(response.headers)) {
-                                    headers.push([key, String(value)]);
-                                }
-                            }
-                        }
-
-                        const responseData = {
-                            status: response.status || 200,
-                            statusText: response.statusText || 'OK',
-                            headers: headers,
-                            body: bodyText
-                        };
-                        // Send to Rust via native function
-                        if (typeof globalThis.__sendFetchResponse === 'function') {
-                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
-                        }
-                        return responseData;
-                    } else {
-                        const responseData = {
-                            status: 200,
-                            statusText: 'OK',
-                            headers: [],
-                            body: String(response)
-                        };
-                        if (typeof globalThis.__sendFetchResponse === 'function') {
-                            globalThis.__sendFetchResponse(JSON.stringify(responseData));
-                        }
-                        return responseData;
-                    }
+                    globalThis.__triggerFetch(request);
+                } else {
+                    throw new Error("No fetch handler registered");
                 }
-                throw new Error("No fetch handler registered");
             })
         "#;
 
@@ -273,52 +191,129 @@ impl Worker {
             return Err(error_msg);
         }
 
-        // Wait for response with adaptive polling
-        // Fast polling for sync responses, timeout after ~2s for unresponsive handlers
-        let response_json = tokio::select! {
-            result = response_rx => {
-                result.map_err(|_| "Response channel closed - handler may not have called respondWith")?
-            }
-            _ = async {
-                // Adaptive polling: fast checks first, then slower
-                // Total timeout: 10 x 1µs + 100 x 1ms + 190 x 10ms = ~2s
-                for iteration in 0..300 {
-                    self.runtime.process_callbacks();
+        // Wait for __lastResponse to be set with adaptive polling
+        // Fast polling for sync responses, timeout after ~5s for async handlers
+        for iteration in 0..500 {
+            self.runtime.process_callbacks();
 
-                    // Adaptive sleep: fast for first checks, slower later
-                    let sleep_duration = if iteration < 10 {
-                        // First 10 iterations: minimal sleep (for immediate sync responses)
-                        tokio::time::Duration::from_micros(1)
-                    } else if iteration < 110 {
-                        // Next 100 iterations: 1ms sleep (for fast async < 100ms)
-                        tokio::time::Duration::from_millis(1)
-                    } else {
-                        // After 110ms: 10ms sleep (for slow operations)
-                        tokio::time::Duration::from_millis(10)
-                    };
+            // Check if __lastResponse is set
+            let check_script = r#"
+                (function() {
+                    const resp = globalThis.__lastResponse;
+                    if (resp && typeof resp === 'object' && resp.status !== undefined) {
+                        return true;
+                    }
+                    return false;
+                })()
+            "#;
 
-                    tokio::time::sleep(sleep_duration).await;
+            if let Ok(result) = self.runtime.context.evaluate_script(check_script, 1) {
+                if result.to_bool(&self.runtime.context) {
+                    break;
                 }
-            } => {
-                return Err("Response timeout: no response after 2s".to_string());
             }
-        };
 
-        // Parse the JSON response
-        #[derive(serde::Deserialize)]
-        struct ResponseData {
-            status: u16,
-            headers: Vec<(String, String)>,
-            body: String,
-            #[serde(rename = "_nativeStreamId")]
-            native_stream_id: Option<u64>,
+            // Adaptive sleep: fast for first checks, slower later
+            let sleep_duration = if iteration < 10 {
+                tokio::time::Duration::from_micros(1)
+            } else if iteration < 110 {
+                tokio::time::Duration::from_millis(1)
+            } else {
+                tokio::time::Duration::from_millis(10)
+            };
+
+            tokio::time::sleep(sleep_duration).await;
+
+            if iteration == 499 {
+                return Err("Response timeout: no response after 5s".to_string());
+            }
         }
 
-        let response_data: ResponseData = serde_json::from_str(&response_json)
-            .map_err(|e| format!("Failed to parse response JSON: {}", e))?;
+        // Extract response data from __lastResponse using JS
+        // This extracts status, headers, _nativeStreamId, and body bytes in one call
+        let extract_script = r#"
+            (function() {
+                const resp = globalThis.__lastResponse;
+                if (!resp) {
+                    return JSON.stringify({ error: 'No response' });
+                }
+
+                // Extract headers
+                const headers = [];
+                if (resp.headers) {
+                    if (resp.headers instanceof Headers) {
+                        for (const [key, value] of resp.headers) {
+                            headers.push([key, String(value)]);
+                        }
+                    } else if (typeof resp.headers === 'object') {
+                        for (const [key, value] of Object.entries(resp.headers)) {
+                            headers.push([key, String(value)]);
+                        }
+                    }
+                }
+
+                // Check for native stream
+                const nativeStreamId = resp._nativeStreamId;
+                if (nativeStreamId !== null && nativeStreamId !== undefined) {
+                    // Streaming response - no body extraction
+                    return JSON.stringify({
+                        status: resp.status || 200,
+                        headers: headers,
+                        nativeStreamId: nativeStreamId,
+                        bodyBase64: null
+                    });
+                }
+
+                // Buffered response - extract body using _getRawBody()
+                let bodyBase64 = '';
+                if (resp._getRawBody) {
+                    const bodyBytes = resp._getRawBody();
+                    if (bodyBytes && bodyBytes.length > 0) {
+                        // Convert Uint8Array to base64
+                        let binary = '';
+                        for (let i = 0; i < bodyBytes.length; i++) {
+                            binary += String.fromCharCode(bodyBytes[i]);
+                        }
+                        bodyBase64 = btoa(binary);
+                    }
+                }
+
+                return JSON.stringify({
+                    status: resp.status || 200,
+                    headers: headers,
+                    nativeStreamId: null,
+                    bodyBase64: bodyBase64
+                });
+            })()
+        "#;
+
+        let extract_result = self
+            .runtime
+            .context
+            .evaluate_script(extract_script, 1)
+            .map_err(|_| "Failed to extract response data")?;
+
+        let json_str = extract_result
+            .to_js_string(&self.runtime.context)
+            .map_err(|_| "Failed to get response JSON")?
+            .to_string();
+
+        // Parse the extracted data
+        #[derive(serde::Deserialize)]
+        struct ExtractedResponse {
+            status: u16,
+            headers: Vec<(String, String)>,
+            #[serde(rename = "nativeStreamId")]
+            native_stream_id: Option<u64>,
+            #[serde(rename = "bodyBase64")]
+            body_base64: Option<String>,
+        }
+
+        let extracted: ExtractedResponse = serde_json::from_str(&json_str)
+            .map_err(|e| format!("Failed to parse extracted response: {}", e))?;
 
         // Determine body type: streaming or buffered
-        let body = if let Some(stream_id) = response_data.native_stream_id {
+        let body = if let Some(stream_id) = extracted.native_stream_id {
             // Native stream forward - create bounded channel for backpressure
             const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
 
@@ -326,13 +321,11 @@ impl Worker {
             let stream_manager = self.runtime.stream_manager.clone();
 
             // Spawn task to read from stream and forward to channel
-            // Backpressure: if channel is full, this task waits (slowing upstream)
             tokio::spawn(async move {
                 loop {
                     match stream_manager.read_chunk(stream_id).await {
                         Ok(chunk) => match chunk {
                             StreamChunk::Data(bytes) => {
-                                // send() is async and waits if buffer is full
                                 if tx.send(Ok(bytes)).await.is_err() {
                                     break;
                                 }
@@ -355,29 +348,54 @@ impl Worker {
 
             ResponseBody::Stream(rx)
         } else {
-            // Buffered body
-            ResponseBody::Bytes(Bytes::from(response_data.body.clone()))
+            // Buffered body - decode from base64
+            let body_bytes = if let Some(b64) = &extracted.body_base64 {
+                if b64.is_empty() {
+                    Bytes::new()
+                } else {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map(Bytes::from)
+                        .unwrap_or_else(|_| Bytes::new())
+                }
+            } else {
+                Bytes::new()
+            };
+            ResponseBody::Bytes(body_bytes)
         };
 
         // Send response back
         let _ = fetch_init.res_tx.send(HttpResponse {
-            status: response_data.status,
-            headers: response_data.headers.clone(),
+            status: extracted.status,
+            headers: extracted.headers.clone(),
             body,
         });
 
         // Return a new response (for exec_http which returns HttpResponse)
-        let return_body = if response_data.native_stream_id.is_some() {
-            // For streaming, we already sent the stream to res_tx
-            // Return empty body since the actual stream was forwarded
+        let return_body = if extracted.native_stream_id.is_some() {
             ResponseBody::None
         } else {
-            ResponseBody::Bytes(Bytes::from(response_data.body))
+            // Decode again for the return value
+            let body_bytes = if let Some(b64) = &extracted.body_base64 {
+                if b64.is_empty() {
+                    Bytes::new()
+                } else {
+                    use base64::Engine;
+                    base64::engine::general_purpose::STANDARD
+                        .decode(b64)
+                        .map(Bytes::from)
+                        .unwrap_or_else(|_| Bytes::new())
+                }
+            } else {
+                Bytes::new()
+            };
+            ResponseBody::Bytes(body_bytes)
         };
 
         Ok(HttpResponse {
-            status: response_data.status,
-            headers: response_data.headers,
+            status: extracted.status,
+            headers: extracted.headers,
             body: return_body,
         })
     }
@@ -513,50 +531,45 @@ fn setup_event_listener(
     let add_event_listener_script = r#"
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
-                globalThis.__triggerFetch = async function(request) {
-                    // Create event with Promise-based respondWith
-                    let resolveResponse;
-                    const responsePromise = new Promise(resolve => {
-                        resolveResponse = resolve;
-                    });
+                globalThis.__fetchHandler = handler;
+                globalThis.__triggerFetch = function(request) {
+                    // Reset last response
+                    globalThis.__lastResponse = null;
 
                     const event = {
                         request: request,
-                        _responded: false,
-                        respondWith: function(response) {
-                            if (this._responded) {
-                                throw new Error('respondWith already called');
+                        respondWith: function(responseOrPromise) {
+                            // Handle both direct Response and Promise<Response>
+                            if (responseOrPromise && typeof responseOrPromise.then === 'function') {
+                                // It's a Promise, wait for it to resolve
+                                responseOrPromise
+                                    .then(response => {
+                                        globalThis.__lastResponse = response;
+                                    })
+                                    .catch(error => {
+                                        console.error('[respondWith] Promise rejected:', error);
+                                        globalThis.__lastResponse = new Response(
+                                            'Promise rejected: ' + (error.message || error),
+                                            { status: 500 }
+                                        );
+                                    });
+                            } else {
+                                // Direct Response object
+                                globalThis.__lastResponse = responseOrPromise;
                             }
-                            this._responded = true;
-                            // Handle both Promise and direct Response
-                            Promise.resolve(response).then(resolveResponse);
                         }
                     };
 
-                    // Call handler - may be sync or async
-                    const handlerResult = handler(event);
-
-                    // If handler returns a promise, wait for it
-                    if (handlerResult && typeof handlerResult.then === 'function') {
-                        await handlerResult;
+                    // Call handler synchronously
+                    try {
+                        handler(event);
+                    } catch (error) {
+                        console.error('[addEventListener] Error in fetch handler:', error);
+                        globalThis.__lastResponse = new Response(
+                            'Handler exception: ' + (error.message || error),
+                            { status: 500 }
+                        );
                     }
-
-                    // If respondWith wasn't called yet, wait a tick for microtasks
-                    if (!event._responded) {
-                        await Promise.resolve();
-                    }
-
-                    // If still no response after microtasks, wait a bit more
-                    if (!event._responded) {
-                        await new Promise(r => setTimeout(r, 0));
-                    }
-
-                    // Final check
-                    if (!event._responded) {
-                        return new Response("No response");
-                    }
-
-                    return responsePromise;
                 };
             } else if (type === 'scheduled') {
                 globalThis.__triggerScheduled = async function(event) {
