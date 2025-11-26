@@ -1,15 +1,19 @@
 [package]
 name = "openworkers-runtime-jsc"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 
 [features]
-actix = ["dep:actix-web"]
+actix = ["dep:actix-web", "openworkers-core/actix"]
 
 [dependencies]
+# Common types
+# openworkers-core = { path = "../openworkers-core", features = ["testing"] }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.4.0", features = ["testing"] }
+
 # JSCore runtime (using local fork)
-rusty_jsc = { path = "/Users/max/Documents/forks/rusty_jsc" }
-rusty_jsc_macros = { path = "/Users/max/Documents/forks/rusty_jsc/macros" }
+rusty_jsc = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7" }
+rusty_jsc_macros = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7" }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
@@ -44,5 +48,5 @@ name = "stream_benchmark"
 harness = false
 
 [[bench]]
-name = "worker_benchmark"
+name = "generic_benchmark"
 harness = false

@@ -1,11 +1,16 @@
 use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
-use crate::task::{HttpResponse, ResponseBody, Task};
 use bytes::Bytes;
+use openworkers_core::{
+    HttpResponse, LogSender, ResponseBody, RuntimeLimits, Script, Task, TerminationReason,
+};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 /// Worker that executes JavaScript with event handlers
 pub struct Worker {
     pub(crate) runtime: Runtime,
     event_loop_handle: tokio::task::JoinHandle<()>,
+    aborted: Arc<AtomicBool>,
 }
 
 impl Worker {
@@ -27,12 +32,12 @@ impl Worker {
 }
 
 impl Worker {
-    /// Create a new worker with full options (openworkers-runtime compatible)
+    /// Create a new worker with full options (openworkers-common compatible)
     pub async fn new(
-        script: crate::compat::Script,
-        _log_tx: Option<std::sync::mpsc::Sender<crate::compat::LogEvent>>,
-        _limits: Option<crate::compat::RuntimeLimits>,
-    ) -> Result<Self, String> {
+        script: Script,
+        _log_tx: Option<LogSender>,
+        _limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
         // Setup addEventListener binding
@@ -45,9 +50,9 @@ impl Worker {
         // Load and evaluate the worker script
         runtime.evaluate(&script.code).map_err(|e| {
             if let Ok(err_str) = e.to_js_string(&runtime.context) {
-                format!("Script evaluation failed: {}", err_str)
+                TerminationReason::Exception(format!("Script evaluation failed: {}", err_str))
             } else {
-                "Script evaluation failed".to_string()
+                TerminationReason::Exception("Script evaluation failed".to_string())
             }
         })?;
 
@@ -59,52 +64,61 @@ impl Worker {
         Ok(Self {
             runtime,
             event_loop_handle,
+            aborted: Arc::new(AtomicBool::new(false)),
         })
     }
 
+    /// Abort the worker execution
+    pub fn abort(&mut self) {
+        self.aborted.store(true, Ordering::SeqCst);
+        self.event_loop_handle.abort();
+    }
+
     /// Execute a task and return termination reason (openworkers-runtime compatible)
-    pub async fn exec(
-        &mut self,
-        mut task: Task,
-    ) -> Result<crate::compat::TerminationReason, String> {
+    pub async fn exec(&mut self, mut task: Task) -> Result<(), TerminationReason> {
+        // Check if aborted before starting
+        if self.aborted.load(Ordering::SeqCst) {
+            return Err(TerminationReason::Aborted);
+        }
+
         match task {
             Task::Fetch(ref mut init) => {
-                let fetch_init = init.take().ok_or("FetchInit already consumed")?;
-
-                // Trigger fetch event in JS
-                match self.trigger_fetch_event(fetch_init).await {
-                    Ok(_) => Ok(crate::compat::TerminationReason::Success),
-                    Err(_) => Ok(crate::compat::TerminationReason::Exception),
-                }
+                let fetch_init = init.take().ok_or(TerminationReason::Other(
+                    "FetchInit already consumed".to_string(),
+                ))?;
+                self.trigger_fetch_event(fetch_init).await?;
+                Ok(())
             }
             Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
-
-                // Trigger scheduled event in JS
-                match self.trigger_scheduled_event(scheduled_init).await {
-                    Ok(_) => Ok(crate::compat::TerminationReason::Success),
-                    Err(_) => Ok(crate::compat::TerminationReason::Exception),
-                }
+                let scheduled_init = init.take().ok_or(TerminationReason::Other(
+                    "ScheduledInit already consumed".to_string(),
+                ))?;
+                self.trigger_scheduled_event(scheduled_init).await?;
+                Ok(())
             }
         }
     }
 
     /// Execute a task and return the HTTP response directly
-    pub async fn exec_http(&mut self, mut task: Task) -> Result<HttpResponse, String> {
+    pub async fn exec_http(&mut self, mut task: Task) -> Result<HttpResponse, TerminationReason> {
         match task {
             Task::Fetch(ref mut init) => {
-                let fetch_init = init.take().ok_or("FetchInit already consumed")?;
+                let fetch_init = init.take().ok_or(TerminationReason::Other(
+                    "FetchInit already consumed".to_string(),
+                ))?;
                 self.trigger_fetch_event(fetch_init).await
             }
             Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or("ScheduledInit already consumed")?;
+                let scheduled_init = init.take().ok_or(TerminationReason::Other(
+                    "ScheduledInit already consumed".to_string(),
+                ))?;
                 self.trigger_scheduled_event(scheduled_init).await?;
 
                 // Return empty response for scheduled events
                 Ok(HttpResponse {
                     status: 200,
                     headers: vec![],
-                    body: crate::task::ResponseBody::None,
+                    body: ResponseBody::None,
                 })
             }
         }
@@ -112,8 +126,8 @@ impl Worker {
 
     async fn trigger_fetch_event(
         &mut self,
-        fetch_init: crate::task::FetchInit,
-    ) -> Result<HttpResponse, String> {
+        fetch_init: openworkers_core::FetchInit,
+    ) -> Result<HttpResponse, TerminationReason> {
         let req = &fetch_init.req;
 
         // Build headers object for JS
@@ -145,7 +159,9 @@ impl Worker {
             .runtime
             .context
             .evaluate_script(&request_script, 1)
-            .map_err(|_| "Failed to create Request object")?;
+            .map_err(|_| {
+                TerminationReason::Exception("Failed to create Request object".to_string())
+            })?;
 
         // Call the fetch event trigger (set by addEventListener)
         // The Response is stored in __lastResponse by the event handler
@@ -163,9 +179,11 @@ impl Worker {
             .runtime
             .context
             .evaluate_script(trigger_script, 1)
-            .map_err(|_| "Failed to get trigger function")?
+            .map_err(|_| {
+                TerminationReason::Exception("Failed to get trigger function".to_string())
+            })?
             .to_object(&self.runtime.context)
-            .map_err(|_| "Trigger is not a function")?;
+            .map_err(|_| TerminationReason::Exception("Trigger is not a function".to_string()))?;
 
         let trigger_result =
             trigger_fn.call_as_function(&self.runtime.context, None, &[request_obj]);
@@ -188,7 +206,7 @@ impl Worker {
             } else {
                 "Fetch handler error (unknown)".to_string()
             };
-            return Err(error_msg);
+            return Err(TerminationReason::Exception(error_msg));
         }
 
         // Wait for __lastResponse to be set with adaptive polling
@@ -225,7 +243,7 @@ impl Worker {
             tokio::time::sleep(sleep_duration).await;
 
             if iteration == 499 {
-                return Err("Response timeout: no response after 5s".to_string());
+                return Err(TerminationReason::WallClockTimeout);
             }
         }
 
@@ -285,11 +303,13 @@ impl Worker {
             .runtime
             .context
             .evaluate_script(extract_script, 1)
-            .map_err(|_| "Failed to extract response data")?;
+            .map_err(|_| {
+                TerminationReason::Exception("Failed to extract response data".to_string())
+            })?;
 
         let json_str = extract_result
             .to_js_string(&self.runtime.context)
-            .map_err(|_| "Failed to get response JSON")?
+            .map_err(|_| TerminationReason::Exception("Failed to get response JSON".to_string()))?
             .to_string();
 
         // Parse the extracted metadata
@@ -303,8 +323,9 @@ impl Worker {
             has_body: bool,
         }
 
-        let extracted: ExtractedResponse = serde_json::from_str(&json_str)
-            .map_err(|e| format!("Failed to parse extracted response: {}", e))?;
+        let extracted: ExtractedResponse = serde_json::from_str(&json_str).map_err(|e| {
+            TerminationReason::Exception(format!("Failed to parse extracted response: {}", e))
+        })?;
 
         // Determine body type: streaming or buffered
         let body = if let Some(stream_id) = extracted.native_stream_id {
@@ -436,8 +457,8 @@ impl Worker {
 
     async fn trigger_scheduled_event(
         &mut self,
-        scheduled_init: crate::task::ScheduledInit,
-    ) -> Result<(), String> {
+        scheduled_init: openworkers_core::ScheduledInit,
+    ) -> Result<(), TerminationReason> {
         // Create event object
         let event_script = format!(
             r#"({{
@@ -450,7 +471,7 @@ impl Worker {
             .runtime
             .context
             .evaluate_script(&event_script, 1)
-            .map_err(|_| "Failed to create event")?;
+            .map_err(|_| TerminationReason::Exception("Failed to create event".to_string()))?;
 
         // Call trigger
         let trigger_script = r#"
@@ -466,9 +487,9 @@ impl Worker {
             .runtime
             .context
             .evaluate_script(trigger_script, 1)
-            .map_err(|_| "Failed to get trigger")?
+            .map_err(|_| TerminationReason::Exception("Failed to get trigger".to_string()))?
             .to_object(&self.runtime.context)
-            .map_err(|_| "Trigger not a function")?;
+            .map_err(|_| TerminationReason::Exception("Trigger not a function".to_string()))?;
 
         if let Err(e) = trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj]) {
             let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
@@ -488,7 +509,7 @@ impl Worker {
             } else {
                 "Scheduled handler error (unknown)".to_string()
             };
-            return Err(error_msg);
+            return Err(TerminationReason::Exception(error_msg));
         }
 
         // Process callbacks with adaptive polling
@@ -627,4 +648,22 @@ fn setup_event_listener(
     context
         .evaluate_script(add_event_listener_script, 1)
         .unwrap();
+}
+
+impl openworkers_core::Worker for Worker {
+    async fn new(
+        script: Script,
+        log_tx: Option<LogSender>,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
+        Worker::new(script, log_tx, limits).await
+    }
+
+    async fn exec(&mut self, task: Task) -> Result<(), TerminationReason> {
+        Worker::exec(self, task).await
+    }
+
+    fn abort(&mut self) {
+        Worker::abort(self)
+    }
 }

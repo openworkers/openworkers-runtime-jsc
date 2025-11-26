@@ -1,4 +1,4 @@
-use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Script, Task, Worker};
+use openworkers_runtime_jsc::{HttpRequest, Script, Task, Worker};
 use std::collections::HashMap;
 
 /// Test basic Request construction with URL string
