@@ -1,4 +1,5 @@
-use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
 /// Test fetch forward - when the response from fetch() is directly passed to respondWith()
@@ -12,16 +13,16 @@ async fn test_fetch_forward_basic() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/test".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
@@ -84,16 +85,16 @@ async fn test_fetch_forward_headers() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/test".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
@@ -138,16 +139,16 @@ async fn test_native_stream_id_propagation() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/test".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);

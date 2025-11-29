@@ -1,4 +1,5 @@
-use openworkers_runtime_jsc::{HttpRequest, Script, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
 /// Test basic Request construction with URL string
@@ -25,17 +26,17 @@ async fn test_request_basic_construction() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -76,17 +77,17 @@ async fn test_request_with_body() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -123,17 +124,17 @@ async fn test_request_clone() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -175,17 +176,17 @@ async fn test_request_from_request() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -221,17 +222,17 @@ async fn test_request_json() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -266,17 +267,17 @@ async fn test_request_arraybuffer() {
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://test.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task, rx) = Task::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.as_bytes().expect("Should have body");
+    let body = response.body.collect().await.expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 

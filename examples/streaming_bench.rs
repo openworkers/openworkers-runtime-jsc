@@ -1,4 +1,5 @@
-use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Script, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
 
@@ -26,10 +27,10 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let start = Instant::now();
@@ -38,7 +39,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
-    let bytes = response.body.as_bytes().unwrap();
+    let bytes = response.body.collect().await.unwrap();
     let total_bytes = bytes.len();
 
     let elapsed = start.elapsed();
@@ -59,10 +60,10 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: RequestBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -89,10 +90,10 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
 
     for _ in 0..iterations {
         let req = HttpRequest {
-            method: "GET".to_string(),
+            method: HttpMethod::Get,
             url: "http://localhost/".to_string(),
             headers: HashMap::new(),
-            body: None,
+            body: RequestBody::None,
         };
 
         let (task, rx) = Task::fetch(req);
@@ -122,10 +123,10 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
     let mut worker = Worker::new(script, None, None).await.unwrap();
 
     let req = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "http://localhost/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let total_start = Instant::now();

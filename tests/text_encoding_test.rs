@@ -1,4 +1,5 @@
-use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
 #[tokio::test]
@@ -25,26 +26,24 @@ async fn test_text_encoder_basic() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
-    let (task, _) = Task::fetch(request);
-    let response = worker.exec_http(task).await.expect("Task should execute");
+    let (task, rx) = Task::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
 
-    if let ResponseBody::Bytes(body) = response.body {
-        assert_eq!(String::from_utf8_lossy(&body), "OK");
-    } else {
-        panic!("Expected bytes body");
-    }
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
 #[tokio::test]
@@ -62,26 +61,24 @@ async fn test_text_decoder_basic() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
-    let (task, _) = Task::fetch(request);
-    let response = worker.exec_http(task).await.expect("Task should execute");
+    let (task, rx) = Task::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
 
-    if let ResponseBody::Bytes(body) = response.body {
-        assert_eq!(String::from_utf8_lossy(&body), "OK");
-    } else {
-        panic!("Expected bytes body");
-    }
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
 #[tokio::test]
@@ -104,26 +101,24 @@ async fn test_text_encoder_emoji() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
-    let (task, _) = Task::fetch(request);
-    let response = worker.exec_http(task).await.expect("Task should execute");
+    let (task, rx) = Task::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
 
-    if let ResponseBody::Bytes(body) = response.body {
-        assert_eq!(String::from_utf8_lossy(&body), "OK");
-    } else {
-        panic!("Expected bytes body");
-    }
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
 #[tokio::test]
@@ -159,24 +154,22 @@ async fn test_text_encoder_roundtrip() {
         });
     "#;
 
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should initialize");
 
     let request = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
-    let (task, _) = Task::fetch(request);
-    let response = worker.exec_http(task).await.expect("Task should execute");
+    let (task, rx) = Task::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
 
-    if let ResponseBody::Bytes(body) = response.body {
-        assert_eq!(String::from_utf8_lossy(&body), "OK");
-    } else {
-        panic!("Expected bytes body");
-    }
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
 }

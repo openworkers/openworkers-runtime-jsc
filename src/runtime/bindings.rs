@@ -131,7 +131,7 @@ pub fn setup_fetch(
                 None
             };
 
-            let request = match super::fetch::request::parse_fetch_options(&ctx, url, options_val) {
+            let request = match super::fetch::parse_fetch_options(&ctx, url, options_val) {
                 Ok(req) => req,
                 Err(e) => return Err(JSValue::string(&ctx, e.as_str())),
             };
@@ -177,18 +177,15 @@ pub fn setup_fetch(
                 // For reject, we could store it separately, but for now we'll use the same callback
             }
 
-            // Schedule the fetch with streaming
-            let _ = scheduler_tx_clone.send(SchedulerMessage::FetchStreaming(
-                callback_id,
-                request.clone(),
-            ));
-
             log::debug!(
                 "fetch: scheduled streaming {} {} (promise_id: {})",
                 request.method.as_str(),
                 request.url,
                 callback_id
             );
+
+            // Schedule the fetch with streaming
+            let _ = scheduler_tx_clone.send(SchedulerMessage::FetchStreaming(callback_id, request));
 
             // Return the Promise
             Ok(promise)
@@ -569,4 +566,106 @@ pub fn setup_stream_ops(
     context
         .evaluate_script(create_native_stream_script, 1)
         .expect("Failed to setup __createNativeStream");
+}
+
+/// Setup response stream operations for streaming all responses
+/// __responseStreamCreate() - creates a stream for response body, returns stream ID
+/// __responseStreamWrite(stream_id, Uint8Array) - writes bytes to the stream
+/// __responseStreamEnd(stream_id) - signals end of stream
+pub fn setup_response_stream_ops(
+    context: &mut JSContext,
+    stream_manager: Arc<super::stream_manager::StreamManager>,
+) {
+    // __responseStreamCreate() -> stream_id
+    let manager_clone = stream_manager.clone();
+    let create_stream = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, _args: &[JSValue]| {
+            let stream_id = manager_clone.create_stream("response".to_string());
+            log::debug!("__responseStreamCreate: created stream {}", stream_id);
+            Ok(JSValue::number(&ctx, stream_id as f64))
+        }
+    );
+
+    // __responseStreamWrite(stream_id, Uint8Array) -> boolean
+    let manager_clone = stream_manager.clone();
+    let write_stream = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 2 {
+                return Err(JSValue::string(
+                    &ctx,
+                    "__responseStreamWrite requires stream_id and data",
+                ));
+            }
+
+            let stream_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as StreamId,
+                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
+            };
+
+            // Get the Uint8Array data
+            let data_obj = match args[1].to_object(&ctx) {
+                Ok(obj) => obj,
+                Err(_) => return Err(JSValue::string(&ctx, "data must be a Uint8Array")),
+            };
+
+            // Read bytes from the TypedArray
+            let bytes = unsafe {
+                match data_obj.get_typed_array_buffer(&ctx) {
+                    Ok(slice) => bytes::Bytes::copy_from_slice(slice),
+                    Err(_) => return Err(JSValue::string(&ctx, "Failed to read TypedArray")),
+                }
+            };
+
+            // Try to write the chunk (non-blocking)
+            match manager_clone
+                .try_write_chunk(stream_id, super::stream_manager::StreamChunk::Data(bytes))
+            {
+                Ok(()) => Ok(JSValue::boolean(&ctx, true)),
+                Err(e) => {
+                    log::warn!("__responseStreamWrite error: {}", e);
+                    Ok(JSValue::boolean(&ctx, false))
+                }
+            }
+        }
+    );
+
+    // __responseStreamEnd(stream_id)
+    let manager_clone = stream_manager;
+    let end_stream = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.is_empty() {
+                return Err(JSValue::string(
+                    &ctx,
+                    "__responseStreamEnd requires stream_id",
+                ));
+            }
+
+            let stream_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as StreamId,
+                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
+            };
+
+            // Send Done signal
+            let _ =
+                manager_clone.try_write_chunk(stream_id, super::stream_manager::StreamChunk::Done);
+
+            log::debug!("__responseStreamEnd: ended stream {}", stream_id);
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    // Add to global object
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "__responseStreamCreate", create_stream.into())
+        .unwrap();
+    global
+        .set_property(context, "__responseStreamWrite", write_stream.into())
+        .unwrap();
+    global
+        .set_property(context, "__responseStreamEnd", end_stream.into())
+        .unwrap();
 }

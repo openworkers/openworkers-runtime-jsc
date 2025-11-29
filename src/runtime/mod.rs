@@ -9,14 +9,15 @@ mod streams;
 mod text_encoding;
 mod url;
 
+// Re-export fetch functions for internal use
+pub use fetch::{execute_fetch_streaming, parse_fetch_options};
+
+use openworkers_core::{HttpRequest, HttpResponseMeta};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
-
-// Re-export fetch types for external use
-pub use fetch::{FetchRequest, FetchResponse};
 
 /// Unique ID for callbacks
 pub type CallbackId = u64;
@@ -29,25 +30,14 @@ pub enum SchedulerMessage {
     ScheduleInterval(CallbackId, u64),
     /// Clear a timer (timeout or interval): (callback_id)
     ClearTimer(CallbackId),
-    /// Fetch a URL: (promise_id, request)
-    Fetch(CallbackId, FetchRequest),
     /// Fetch with streaming response: (promise_id, request)
-    FetchStreaming(CallbackId, FetchRequest),
+    FetchStreaming(CallbackId, HttpRequest),
     /// Read next chunk from stream: (callback_id, stream_id)
     StreamRead(CallbackId, stream_manager::StreamId),
     /// Cancel/close a stream
     StreamCancel(stream_manager::StreamId),
     /// Shutdown the event loop
     Shutdown,
-}
-
-/// Metadata for streaming fetch response (status, headers, stream ID)
-#[derive(Debug, Clone)]
-pub struct FetchResponseMeta {
-    pub status: u16,
-    pub status_text: String,
-    pub headers: std::collections::HashMap<String, String>,
-    pub stream_id: stream_manager::StreamId,
 }
 
 /// Message sent back from the event loop to execute callbacks
@@ -60,12 +50,10 @@ pub enum CallbackMessage {
     ExecutePromiseResolve(CallbackId, String),
     /// Execute a Promise reject callback with error
     ExecutePromiseReject(CallbackId, String),
-    /// Resolve a fetch Promise with response
-    FetchSuccess(CallbackId, FetchResponse),
     /// Reject a fetch Promise with error
     FetchError(CallbackId, String),
     /// Fetch streaming success: metadata + stream ID
-    FetchStreamingSuccess(CallbackId, FetchResponseMeta),
+    FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId),
     /// Stream chunk ready
     StreamChunk(CallbackId, stream_manager::StreamChunk),
 }
@@ -164,6 +152,9 @@ impl Runtime {
             callbacks.clone(),
             next_callback_id.clone(),
         );
+
+        // Setup response stream operations for streaming all responses
+        bindings::setup_response_stream_ops(&mut context, stream_manager.clone());
 
         let runtime = Self {
             context,
@@ -265,41 +256,6 @@ impl Runtime {
                         }
                     }
                 }
-                CallbackMessage::FetchSuccess(callback_id, response) => {
-                    // Execute fetch resolve callback with Response object
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
-
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Resolving fetch promise {}", callback_id);
-
-                        // Create Response object using the dedicated module
-                        match fetch::response::create_response_object(&mut self.context, response) {
-                            Ok(response_obj) => {
-                                match callback.call_as_function(
-                                    &self.context,
-                                    None,
-                                    &[response_obj],
-                                ) {
-                                    Ok(_) => log::debug!("Fetch promise resolved successfully"),
-                                    Err(e) => {
-                                        if let Ok(err_str) = e.to_js_string(&self.context) {
-                                            log::error!(
-                                                "Fetch resolve callback failed: {}",
-                                                err_str
-                                            );
-                                        }
-                                    }
-                                }
-                            }
-                            Err(e) => {
-                                log::error!("Failed to create Response object: {}", e);
-                            }
-                        }
-                    }
-                }
                 CallbackMessage::FetchError(callback_id, error_msg) => {
                     // Execute fetch reject callback
                     let callback_opt = {
@@ -358,7 +314,7 @@ impl Runtime {
                         }
                     }
                 }
-                CallbackMessage::FetchStreamingSuccess(callback_id, meta) => {
+                CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
                     // Execute fetch resolve callback with a full Response object
                     let callback_opt = {
                         let mut cbs = self.callbacks.lock().unwrap();
@@ -369,7 +325,7 @@ impl Runtime {
                         log::debug!(
                             "Resolving fetch streaming promise {} with stream {}",
                             callback_id,
-                            meta.stream_id
+                            stream_id
                         );
 
                         // Create a Response with streaming body using __createNativeStream
@@ -387,7 +343,7 @@ impl Runtime {
                                 response._isStreaming = true;
                                 return response;
                             }})()"#,
-                            meta.stream_id, meta.status, meta.status_text, headers_json
+                            stream_id, meta.status, meta.status_text, headers_json
                         );
 
                         match self.context.evaluate_script(&response_script, 1) {
@@ -539,23 +495,6 @@ pub async fn run_event_loop(
 
                 running_tasks.insert(callback_id, handle);
             }
-            SchedulerMessage::Fetch(promise_id, request) => {
-                log::debug!("Fetching {} {}", request.method.as_str(), request.url);
-
-                let callback_tx = callback_tx.clone();
-                tokio::spawn(async move {
-                    // Execute the fetch request
-                    match fetch::request::execute_fetch(request).await {
-                        Ok(response) => {
-                            let _ = callback_tx
-                                .send(CallbackMessage::FetchSuccess(promise_id, response));
-                        }
-                        Err(e) => {
-                            let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
-                        }
-                    }
-                });
-            }
             SchedulerMessage::FetchStreaming(promise_id, request) => {
                 log::debug!(
                     "Fetching streaming {} {}",
@@ -566,10 +505,11 @@ pub async fn run_event_loop(
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
                 tokio::spawn(async move {
-                    match fetch::request::execute_fetch_streaming(request, manager).await {
-                        Ok(meta) => {
-                            let _ = callback_tx
-                                .send(CallbackMessage::FetchStreamingSuccess(promise_id, meta));
+                    match fetch::execute_fetch_streaming(request, manager).await {
+                        Ok((meta, stream_id)) => {
+                            let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
+                                promise_id, meta, stream_id,
+                            ));
                         }
                         Err(e) => {
                             let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));

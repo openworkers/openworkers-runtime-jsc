@@ -3,7 +3,8 @@
 // To run: cargo run --example worker
 
 use bytes::Bytes;
-use openworkers_runtime_jsc::{HttpRequest, ResponseBody, Task, Worker};
+use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
 #[tokio::main]
@@ -59,17 +60,17 @@ async fn main() {
     "#;
 
     // Create worker
-    let script_obj = openworkers_runtime_jsc::Script::new(script);
+    let script_obj = Script::new(script);
     let mut worker = Worker::new(script_obj, None, None)
         .await
         .expect("Worker should load");
 
     println!("\n=== Test 1: GET /api/hello ===");
     let request1 = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/api/hello".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task1, _) = Task::fetch(request1);
@@ -82,10 +83,10 @@ async fn main() {
 
     println!("\n=== Test 2: POST /api/echo ===");
     let request2 = HttpRequest {
-        method: "POST".to_string(),
+        method: HttpMethod::Post,
         url: "https://example.com/api/echo".to_string(),
         headers: HashMap::new(),
-        body: Some(Bytes::from("Test message from Rust")),
+        body: RequestBody::Bytes(Bytes::from("Test message from Rust")),
     };
 
     let (task2, _) = Task::fetch(request2);
@@ -98,10 +99,10 @@ async fn main() {
 
     println!("\n=== Test 3: GET /unknown ===");
     let request3 = HttpRequest {
-        method: "GET".to_string(),
+        method: HttpMethod::Get,
         url: "https://example.com/unknown".to_string(),
         headers: HashMap::new(),
-        body: None,
+        body: RequestBody::None,
     };
 
     let (task3, _) = Task::fetch(request3);

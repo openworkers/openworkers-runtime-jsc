@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
-use bytes::Bytes;
 use openworkers_core::{
-    HttpResponse, LogSender, ResponseBody, RuntimeLimits, Script, Task, TerminationReason,
+    HttpResponse, LogSender, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
+    TerminationReason,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -134,11 +134,10 @@ impl Worker {
         let headers_json = serde_json::to_string(&req.headers).unwrap_or("{}".to_string());
 
         // Create Request object
-        let body_str = req
-            .body
-            .as_ref()
-            .and_then(|b| String::from_utf8(b.to_vec()).ok())
-            .unwrap_or_default();
+        let body_str = match &req.body {
+            RequestBody::Bytes(bytes) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
+            RequestBody::None => String::new(),
+        };
 
         let request_script = format!(
             r#"({{
@@ -248,7 +247,7 @@ impl Worker {
         }
 
         // Extract response metadata from __lastResponse
-        // Also call _getRawBody() and store result in __lastResponse._bodyBytes for direct access
+        // All responses with body are now streamed via _responseStreamId
         let extract_script = r#"
             (function() {
                 const resp = globalThis.__lastResponse;
@@ -270,31 +269,14 @@ impl Worker {
                     }
                 }
 
-                // Check for native stream
-                const nativeStreamId = resp._nativeStreamId;
-                if (nativeStreamId !== null && nativeStreamId !== undefined) {
-                    // Streaming response - no body extraction
-                    return JSON.stringify({
-                        status: resp.status || 200,
-                        headers: headers,
-                        nativeStreamId: nativeStreamId,
-                        hasBody: false
-                    });
-                }
-
-                // Buffered response - extract body using _getRawBody()
-                // Store directly on the response object for Rust access
-                if (resp._getRawBody) {
-                    resp._bodyBytes = resp._getRawBody();
-                } else {
-                    resp._bodyBytes = new Uint8Array(0);
-                }
+                // Check for response stream ID (all responses with body have this now)
+                const responseStreamId = resp._responseStreamId;
 
                 return JSON.stringify({
                     status: resp.status || 200,
                     headers: headers,
-                    nativeStreamId: null,
-                    hasBody: resp._bodyBytes && resp._bodyBytes.length > 0
+                    responseStreamId: responseStreamId !== undefined ? responseStreamId : null,
+                    hasBody: resp.body !== null
                 });
             })()
         "#;
@@ -317,8 +299,8 @@ impl Worker {
         struct ExtractedResponse {
             status: u16,
             headers: Vec<(String, String)>,
-            #[serde(rename = "nativeStreamId")]
-            native_stream_id: Option<u64>,
+            #[serde(rename = "responseStreamId")]
+            response_stream_id: Option<u64>,
             #[serde(rename = "hasBody")]
             has_body: bool,
         }
@@ -327,19 +309,19 @@ impl Worker {
             TerminationReason::Exception(format!("Failed to parse extracted response: {}", e))
         })?;
 
-        // Determine body type: streaming or buffered
-        let body = if let Some(stream_id) = extracted.native_stream_id {
-            // Native stream forward - create bounded channel for backpressure
-            const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
+        // All responses with body are now streamed
+        let body = if let Some(stream_id) = extracted.response_stream_id {
+            // Take the receiver from stream manager
+            if let Some(rx) = self.runtime.stream_manager.take_receiver(stream_id) {
+                // Create bounded channel for HttpBody
+                const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
+                let (tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
 
-            let (tx, rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
-            let stream_manager = self.runtime.stream_manager.clone();
-
-            // Spawn task to read from stream and forward to channel
-            tokio::spawn(async move {
-                loop {
-                    match stream_manager.read_chunk(stream_id).await {
-                        Ok(chunk) => match chunk {
+                // Spawn task to forward from StreamChunk to Result<Bytes, String>
+                tokio::spawn(async move {
+                    let mut rx = rx;
+                    while let Some(chunk) = rx.recv().await {
+                        match chunk {
                             StreamChunk::Data(bytes) => {
                                 if tx.send(Ok(bytes)).await.is_err() {
                                     break;
@@ -352,56 +334,21 @@ impl Worker {
                                 let _ = tx.send(Err(e)).await;
                                 break;
                             }
-                        },
-                        Err(e) => {
-                            let _ = tx.send(Err(e)).await;
-                            break;
                         }
                     }
-                }
-            });
+                });
 
-            ResponseBody::Stream(rx)
-        } else {
-            // Buffered body - read directly from __lastResponse._bodyBytes via TypedArray API
-            let body_bytes = if extracted.has_body {
-                // Get __lastResponse from global
-                let global = self.runtime.context.get_global_object();
-                if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse")
-                {
-                    if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
-                        // Get _bodyBytes property
-                        if let Some(body_val) =
-                            resp_obj.get_property(&self.runtime.context, "_bodyBytes")
-                        {
-                            if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
-                                // Use get_typed_array_buffer to read bytes directly
-                                // Safety: we read synchronously and copy the data immediately
-                                unsafe {
-                                    if let Ok(slice) =
-                                        body_obj.get_typed_array_buffer(&self.runtime.context)
-                                    {
-                                        Bytes::copy_from_slice(slice)
-                                    } else {
-                                        Bytes::new()
-                                    }
-                                }
-                            } else {
-                                Bytes::new()
-                            }
-                        } else {
-                            Bytes::new()
-                        }
-                    } else {
-                        Bytes::new()
-                    }
-                } else {
-                    Bytes::new()
-                }
+                ResponseBody::Stream(response_rx)
             } else {
-                Bytes::new()
-            };
-            ResponseBody::Bytes(body_bytes.clone())
+                // Stream not found, return empty
+                ResponseBody::None
+            }
+        } else if extracted.has_body {
+            // Has body but no stream ID - shouldn't happen, but handle it
+            ResponseBody::None
+        } else {
+            // No body
+            ResponseBody::None
         };
 
         // Send response back via channel
@@ -411,47 +358,11 @@ impl Worker {
             body,
         });
 
-        // Return response for exec_http
-        let return_body = if extracted.native_stream_id.is_some() {
-            ResponseBody::None
-        } else if extracted.has_body {
-            // Re-read from __lastResponse._bodyBytes
-            let global = self.runtime.context.get_global_object();
-            if let Some(resp_val) = global.get_property(&self.runtime.context, "__lastResponse") {
-                if let Ok(resp_obj) = resp_val.to_object(&self.runtime.context) {
-                    if let Some(body_val) =
-                        resp_obj.get_property(&self.runtime.context, "_bodyBytes")
-                    {
-                        if let Ok(body_obj) = body_val.to_object(&self.runtime.context) {
-                            unsafe {
-                                if let Ok(slice) =
-                                    body_obj.get_typed_array_buffer(&self.runtime.context)
-                                {
-                                    ResponseBody::Bytes(Bytes::copy_from_slice(slice))
-                                } else {
-                                    ResponseBody::Bytes(Bytes::new())
-                                }
-                            }
-                        } else {
-                            ResponseBody::Bytes(Bytes::new())
-                        }
-                    } else {
-                        ResponseBody::Bytes(Bytes::new())
-                    }
-                } else {
-                    ResponseBody::Bytes(Bytes::new())
-                }
-            } else {
-                ResponseBody::Bytes(Bytes::new())
-            }
-        } else {
-            ResponseBody::Bytes(Bytes::new())
-        };
-
+        // Return response for exec_http (body already sent via channel)
         Ok(HttpResponse {
             status: extracted.status,
             headers: extracted.headers,
-            body: return_body,
+            body: ResponseBody::None,
         })
     }
 
@@ -584,6 +495,46 @@ fn setup_event_listener(
         .unwrap();
 
     let add_event_listener_script = r#"
+        // Stream all response bodies to Rust
+        globalThis.__streamResponseBody = async function(response) {
+            if (!response || !response.body) {
+                // No body to stream
+                return response;
+            }
+
+            // If it already has a native stream ID (fetch forward), use that
+            if (response.body._nativeStreamId !== undefined) {
+                response._responseStreamId = response.body._nativeStreamId;
+                return response;
+            }
+
+            // Create output stream
+            const streamId = __responseStreamCreate();
+            response._responseStreamId = streamId;
+
+            // Start streaming asynchronously
+            (async () => {
+                try {
+                    const reader = response.body.getReader();
+                    while (true) {
+                        const { done, value } = await reader.read();
+                        if (done) {
+                            __responseStreamEnd(streamId);
+                            break;
+                        }
+                        if (value) {
+                            __responseStreamWrite(streamId, value);
+                        }
+                    }
+                } catch (e) {
+                    console.error('[__streamResponseBody] Error:', e);
+                    __responseStreamEnd(streamId);
+                }
+            })();
+
+            return response;
+        };
+
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
                 globalThis.__fetchHandler = handler;
@@ -596,21 +547,22 @@ fn setup_event_listener(
                         respondWith: function(responseOrPromise) {
                             // Handle both direct Response and Promise<Response>
                             if (responseOrPromise && typeof responseOrPromise.then === 'function') {
-                                // It's a Promise, wait for it to resolve
+                                // It's a Promise, wait for it to resolve then stream
                                 responseOrPromise
+                                    .then(response => __streamResponseBody(response))
                                     .then(response => {
                                         globalThis.__lastResponse = response;
                                     })
                                     .catch(error => {
                                         console.error('[respondWith] Promise rejected:', error);
-                                        globalThis.__lastResponse = new Response(
-                                            'Promise rejected: ' + (error.message || error),
-                                            { status: 500 }
-                                        );
+                                        globalThis.__lastResponse = new Response(null, { status: 500 });
                                     });
                             } else {
-                                // Direct Response object
-                                globalThis.__lastResponse = responseOrPromise;
+                                // Direct Response object - stream it
+                                __streamResponseBody(responseOrPromise)
+                                    .then(response => {
+                                        globalThis.__lastResponse = response;
+                                    });
                             }
                         }
                     };
@@ -620,10 +572,7 @@ fn setup_event_listener(
                         handler(event);
                     } catch (error) {
                         console.error('[addEventListener] Error in fetch handler:', error);
-                        globalThis.__lastResponse = new Response(
-                            'Handler exception: ' + (error.message || error),
-                            { status: 500 }
-                        );
+                        globalThis.__lastResponse = new Response(null, { status: 500 });
                     }
                 };
             } else if (type === 'scheduled') {
