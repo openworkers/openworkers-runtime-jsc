@@ -143,7 +143,7 @@ impl Worker {
             r#"({{
                 method: "{}",
                 url: "{}",
-                headers: {},
+                headers: new Headers({}),
                 text: () => Promise.resolve("{}"),
                 json: () => Promise.resolve(JSON.parse("{}")),
             }})"#,
