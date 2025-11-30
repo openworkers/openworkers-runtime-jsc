@@ -207,11 +207,53 @@ pub fn setup_fetch(
         }
     );
 
-    // Add fetch to global object
+    // Add native fetch to global object (as __nativeFetch)
     let mut global = context.get_global_object();
     global
-        .set_property(context, "fetch", fetch_fn.into())
+        .set_property(context, "__nativeFetch", fetch_fn.into())
         .unwrap();
+
+    // Create JS wrapper that handles ReadableStream bodies
+    let wrapper_code = r#"
+        globalThis.fetch = async function(url, options = {}) {
+            // If body is a ReadableStream, consume it first
+            if (options && options.body instanceof ReadableStream) {
+                console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
+                const reader = options.body.getReader();
+                const chunks = [];
+
+                while (true) {
+                    const { done, value } = await reader.read();
+                    if (done) break;
+                    if (value) chunks.push(value);
+                }
+
+                // Combine chunks into a single Uint8Array
+                if (chunks.length > 0) {
+                    const totalLength = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+                    const combined = new Uint8Array(totalLength);
+                    let offset = 0;
+                    for (const chunk of chunks) {
+                        combined.set(chunk, offset);
+                        offset += chunk.length;
+                    }
+                    // Convert to string for the native fetch
+                    options = {
+                        ...options,
+                        body: new TextDecoder().decode(combined)
+                    };
+                } else {
+                    options = { ...options, body: undefined };
+                }
+            }
+
+            return __nativeFetch(url, options);
+        };
+    "#;
+
+    context
+        .evaluate_script(wrapper_code, 1)
+        .expect("Failed to setup fetch wrapper");
 }
 
 /// Setup timer bindings (setTimeout, setInterval, clearTimeout, clearInterval)
