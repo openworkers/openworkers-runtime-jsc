@@ -43,7 +43,9 @@ impl Worker {
         // Setup addEventListener binding
         setup_event_listener(&mut runtime.context, runtime.fetch_response_tx.clone());
 
-        // TODO: Apply environment variables from script.env
+        // Setup environment variables
+        setup_env(&mut runtime.context, &script.env);
+
         // TODO: Apply runtime limits
         // TODO: Wire up log_tx for console output
 
@@ -597,6 +599,40 @@ fn setup_event_listener(
     context
         .evaluate_script(add_event_listener_script, 1)
         .unwrap();
+}
+
+/// Setup environment variables as globalThis.env
+fn setup_env(
+    context: &mut rusty_jsc::JSContext,
+    env: &Option<std::collections::HashMap<String, String>>,
+) {
+    let env_json = if let Some(env_map) = env {
+        let pairs: Vec<String> = env_map
+            .iter()
+            .map(|(k, v)| {
+                format!(
+                    "\"{}\": \"{}\"",
+                    k.replace('\\', "\\\\").replace('"', "\\\""),
+                    v.replace('\\', "\\\\").replace('"', "\\\"")
+                )
+            })
+            .collect();
+        format!("{{{}}}", pairs.join(", "))
+    } else {
+        "{}".to_string()
+    };
+
+    let script = format!(
+        r#"Object.defineProperty(globalThis, 'env', {{
+            value: {},
+            writable: false,
+            enumerable: true,
+            configurable: false
+        }});"#,
+        env_json
+    );
+
+    context.evaluate_script(&script, 1).unwrap();
 }
 
 impl openworkers_core::Worker for Worker {
