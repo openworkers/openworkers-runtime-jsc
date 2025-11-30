@@ -101,9 +101,6 @@ impl Runtime {
 
         let mut context = JSContext::default();
 
-        // Setup console.log
-        bindings::setup_console(&mut context);
-
         // Setup queueMicrotask
         bindings::setup_microtask(&mut context);
 

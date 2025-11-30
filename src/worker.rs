@@ -35,7 +35,7 @@ impl Worker {
     /// Create a new worker with full options (openworkers-common compatible)
     pub async fn new(
         script: Script,
-        _log_tx: Option<LogSender>,
+        log_tx: Option<LogSender>,
         _limits: Option<RuntimeLimits>,
     ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
@@ -46,8 +46,10 @@ impl Worker {
         // Setup environment variables
         setup_env(&mut runtime.context, &script.env);
 
+        // Setup console with log_tx
+        crate::runtime::bindings::setup_console(&mut runtime.context, log_tx);
+
         // TODO: Apply runtime limits
-        // TODO: Wire up log_tx for console output
 
         // Load and evaluate the worker script
         runtime.evaluate(&script.code).map_err(|e| {

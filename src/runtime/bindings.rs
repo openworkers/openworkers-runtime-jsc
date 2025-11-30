@@ -1,4 +1,5 @@
 use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
+use openworkers_core::{LogEvent, LogLevel, LogSender};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
 use std::collections::HashMap;
@@ -12,60 +13,87 @@ pub struct TimerState {
     pub next_id: Arc<Mutex<CallbackId>>,
 }
 
-#[callback]
-fn console_log(
-    ctx: JSContext,
-    _function: JSObject,
-    _this: JSObject,
-    args: &[JSValue],
-) -> Result<JSValue, JSValue> {
-    let messages: Vec<String> = args
-        .iter()
-        .map(|arg| {
-            arg.to_js_string(&ctx)
+/// Setup console bindings (log, info, warn, error, debug) with log_tx support
+pub fn setup_console(context: &mut JSContext, log_tx: Option<LogSender>) {
+    let log_tx = Arc::new(Mutex::new(log_tx));
+
+    // Create native __console_log function that accepts level and message
+    let log_tx_clone = log_tx.clone();
+    let console_log_fn = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 2 {
+                return Ok(JSValue::undefined(&ctx));
+            }
+
+            let level_num = args[0].to_number(&ctx).map(|n| n as i32).unwrap_or(2);
+            let level = match level_num {
+                0 => LogLevel::Error,
+                1 => LogLevel::Warn,
+                _ => LogLevel::Info,
+            };
+
+            let msg = args[1]
+                .to_js_string(&ctx)
                 .map(|s| s.to_string())
-                .unwrap_or_else(|_| "[value]".to_string())
-        })
-        .collect();
+                .unwrap_or_default();
 
-    println!("[JS] {}", messages.join(" "));
-    Ok(JSValue::undefined(&ctx))
-}
+            // Send to log_tx if available
+            if let Ok(guard) = log_tx_clone.lock() {
+                if let Some(ref tx) = *guard {
+                    let _ = tx.send(LogEvent {
+                        level: level.clone(),
+                        message: msg.clone(),
+                    });
+                }
+            }
 
-/// Setup console bindings (log, info, warn, error, debug)
-pub fn setup_console(context: &mut JSContext) {
-    let global = context.get_global_object();
+            // Also print to stdout
+            let prefix = match level {
+                LogLevel::Error => "[ERROR]",
+                LogLevel::Warn => "[WARN]",
+                LogLevel::Info | LogLevel::Log => "[LOG]",
+                LogLevel::Debug | LogLevel::Trace => "[DEBUG]",
+            };
+            println!("{} {}", prefix, msg);
 
-    // Create console.log function
-    let log_fn = JSValue::callback(context, Some(console_log));
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
 
-    // Create console object via JS and add all methods
-    context
-        .evaluate_script("globalThis.console = {}", 1)
-        .unwrap();
-    let console_obj = global
-        .get_property(context, "console")
-        .unwrap()
-        .to_object(context)
+    // Add __console_log to global
+    let mut global = context.get_global_object();
+    global
+        .set_property(context, "__console_log", console_log_fn.into())
         .unwrap();
 
-    let mut console_mut = console_obj;
-    // All methods use the same function for now (they all print to stdout)
-    console_mut
-        .set_property(context, "log", log_fn.clone())
-        .unwrap();
-    console_mut
-        .set_property(context, "info", log_fn.clone())
-        .unwrap();
-    console_mut
-        .set_property(context, "warn", log_fn.clone())
-        .unwrap();
-    console_mut
-        .set_property(context, "error", log_fn.clone())
-        .unwrap();
-    console_mut
-        .set_property(context, "debug", log_fn)
-        .unwrap();
+    // Create console object via JS that calls __console_log with appropriate level
+    let console_script = r#"
+        globalThis.console = {
+            log: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(2, msg);
+            },
+            info: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(2, msg);
+            },
+            warn: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(1, msg);
+            },
+            error: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(0, msg);
+            },
+            debug: function(...args) {
+                const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
+                __console_log(2, msg);
+            }
+        };
+    "#;
+
+    context.evaluate_script(console_script, 1).unwrap();
 }
 
 #[callback]
