@@ -32,14 +32,14 @@ fn console_log(
     Ok(JSValue::undefined(&ctx))
 }
 
-/// Setup console.log binding
+/// Setup console bindings (log, info, warn, error, debug)
 pub fn setup_console(context: &mut JSContext) {
     let global = context.get_global_object();
 
     // Create console.log function
     let log_fn = JSValue::callback(context, Some(console_log));
 
-    // Create console object via JS and add log method
+    // Create console object via JS and add all methods
     context
         .evaluate_script("globalThis.console = {}", 1)
         .unwrap();
@@ -50,7 +50,22 @@ pub fn setup_console(context: &mut JSContext) {
         .unwrap();
 
     let mut console_mut = console_obj;
-    console_mut.set_property(context, "log", log_fn).unwrap();
+    // All methods use the same function for now (they all print to stdout)
+    console_mut
+        .set_property(context, "log", log_fn.clone())
+        .unwrap();
+    console_mut
+        .set_property(context, "info", log_fn.clone())
+        .unwrap();
+    console_mut
+        .set_property(context, "warn", log_fn.clone())
+        .unwrap();
+    console_mut
+        .set_property(context, "error", log_fn.clone())
+        .unwrap();
+    console_mut
+        .set_property(context, "debug", log_fn)
+        .unwrap();
 }
 
 #[callback]
