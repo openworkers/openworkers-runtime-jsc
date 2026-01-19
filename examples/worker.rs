@@ -3,7 +3,7 @@
 // To run: cargo run --example worker
 
 use bytes::Bytes;
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
@@ -61,7 +61,7 @@ async fn main() {
 
     // Create worker
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should load");
 
@@ -73,8 +73,8 @@ async fn main() {
         body: RequestBody::None,
     };
 
-    let (task1, _) = Task::fetch(request1);
-    let response1 = worker.exec_http(task1).await.expect("Task should execute");
+    let (task1, _) = Event::fetch(request1);
+    let response1 = worker.exec_http(task1).await.expect("Event should execute");
 
     println!("Status: {}", response1.status);
     if let ResponseBody::Bytes(body) = response1.body {
@@ -89,8 +89,8 @@ async fn main() {
         body: RequestBody::Bytes(Bytes::from("Test message from Rust")),
     };
 
-    let (task2, _) = Task::fetch(request2);
-    let response2 = worker.exec_http(task2).await.expect("Task should execute");
+    let (task2, _) = Event::fetch(request2);
+    let response2 = worker.exec_http(task2).await.expect("Event should execute");
 
     println!("Status: {}", response2.status);
     if let ResponseBody::Bytes(body) = response2.body {
@@ -105,8 +105,8 @@ async fn main() {
         body: RequestBody::None,
     };
 
-    let (task3, _) = Task::fetch(request3);
-    let response3 = worker.exec_http(task3).await.expect("Task should execute");
+    let (task3, _) = Event::fetch(request3);
+    let response3 = worker.exec_http(task3).await.expect("Event should execute");
 
     println!("Status: {}", response3.status);
     if let ResponseBody::Bytes(body) = response3.body {

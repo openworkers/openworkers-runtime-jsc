@@ -1,4 +1,4 @@
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
@@ -21,7 +21,7 @@ async fn test_request_basic_construction() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -32,7 +32,7 @@ async fn test_request_basic_construction() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -72,7 +72,7 @@ async fn test_request_with_body() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -83,7 +83,7 @@ async fn test_request_with_body() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -119,7 +119,7 @@ async fn test_request_clone() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -130,7 +130,7 @@ async fn test_request_clone() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -171,7 +171,7 @@ async fn test_request_from_request() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -182,7 +182,7 @@ async fn test_request_from_request() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -217,7 +217,7 @@ async fn test_request_json() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -228,7 +228,7 @@ async fn test_request_json() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -262,7 +262,7 @@ async fn test_request_arraybuffer() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -273,7 +273,7 @@ async fn test_request_arraybuffer() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");

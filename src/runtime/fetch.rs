@@ -4,6 +4,7 @@ use futures_util::StreamExt;
 use openworkers_core::{HttpMethod, HttpRequest, HttpResponseMeta, RequestBody};
 use rusty_jsc::{JSContext, JSValue};
 use std::collections::HashMap;
+use std::str::FromStr;
 use std::sync::Arc;
 
 // ============================================================================
@@ -144,7 +145,7 @@ pub fn parse_fetch_options(
             if !method_val.is_undefined(context) && !method_val.is_null(context) {
                 if let Ok(method_str) = method_val.to_js_string(context) {
                     method = HttpMethod::from_str(&method_str.to_string())
-                        .ok_or_else(|| format!("Invalid HTTP method: {}", method_str))?;
+                        .map_err(|_| format!("Invalid HTTP method: {}", method_str))?;
                 }
             }
         }
@@ -204,6 +205,10 @@ pub async fn execute_fetch_streaming(
     match request.body {
         RequestBody::Bytes(ref bytes) => {
             req_builder = req_builder.body(bytes.clone());
+        }
+        RequestBody::Stream(_) => {
+            // Streaming request body not supported yet in JSC runtime
+            return Err("Streaming request body not supported".to_string());
         }
         RequestBody::None => {}
     }

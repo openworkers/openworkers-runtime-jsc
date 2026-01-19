@@ -1,5 +1,4 @@
 use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
-use openworkers_core::{LogEvent, LogLevel, LogSender};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
 use std::collections::HashMap;
@@ -13,12 +12,9 @@ pub struct TimerState {
     pub next_id: Arc<Mutex<CallbackId>>,
 }
 
-/// Setup console bindings (log, info, warn, error, debug) with log_tx support
-pub fn setup_console(context: &mut JSContext, log_tx: Option<LogSender>) {
-    let log_tx = Arc::new(Mutex::new(log_tx));
-
+/// Setup console bindings (log, info, warn, error, debug)
+pub fn setup_console(context: &mut JSContext) {
     // Create native __console_log function that accepts level and message
-    let log_tx_clone = log_tx.clone();
     let console_log_fn = rusty_jsc::callback_closure!(
         context,
         move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
@@ -27,33 +23,16 @@ pub fn setup_console(context: &mut JSContext, log_tx: Option<LogSender>) {
             }
 
             let level_num = args[0].to_number(&ctx).map(|n| n as i32).unwrap_or(2);
-            let level = match level_num {
-                0 => LogLevel::Error,
-                1 => LogLevel::Warn,
-                _ => LogLevel::Info,
-            };
-
             let msg = args[1]
                 .to_js_string(&ctx)
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            // Send to log_tx if available
-            if let Ok(guard) = log_tx_clone.lock() {
-                if let Some(ref tx) = *guard {
-                    let _ = tx.send(LogEvent {
-                        level: level.clone(),
-                        message: msg.clone(),
-                    });
-                }
-            }
-
-            // Also print to stdout
-            let prefix = match level {
-                LogLevel::Error => "[ERROR]",
-                LogLevel::Warn => "[WARN]",
-                LogLevel::Info | LogLevel::Log => "[LOG]",
-                LogLevel::Debug | LogLevel::Trace => "[DEBUG]",
+            // Print to stdout
+            let prefix = match level_num {
+                0 => "[ERROR]",
+                1 => "[WARN]",
+                _ => "[LOG]",
             };
             println!("{} {}", prefix, msg);
 

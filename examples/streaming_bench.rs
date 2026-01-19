@@ -1,4 +1,4 @@
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
@@ -23,8 +23,8 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
         chunk_size, chunk_count
     );
 
-    let script = Script::new(&code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let script = Script::new(code);
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -35,7 +35,7 @@ async fn bench_local_stream(chunk_count: usize, chunk_size: usize) -> (Duration,
 
     let start = Instant::now();
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 
@@ -54,7 +54,7 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let start = Instant::now();
 
@@ -66,7 +66,7 @@ async fn bench_buffered_response(iterations: u32) -> Duration {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
         assert!(!response.body.is_stream());
@@ -84,7 +84,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
     "#;
 
     let script = Script::new(code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let start = Instant::now();
 
@@ -96,7 +96,7 @@ async fn bench_streaming_forward(iterations: u32) -> Duration {
             body: RequestBody::None,
         };
 
-        let (task, rx) = Task::fetch(req);
+        let (task, rx) = Event::fetch(req);
         worker.exec(task).await.unwrap();
         let response = rx.await.unwrap();
 
@@ -119,8 +119,8 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
         size_kb * 1024
     );
 
-    let script = Script::new(&code);
-    let mut worker = Worker::new(script, None, None).await.unwrap();
+    let script = Script::new(code);
+    let mut worker = Worker::new(script, None).await.unwrap();
 
     let req = HttpRequest {
         method: HttpMethod::Get,
@@ -131,7 +131,7 @@ async fn bench_large_streaming(size_kb: usize) -> (Duration, usize) {
 
     let total_start = Instant::now();
 
-    let (task, rx) = Task::fetch(req);
+    let (task, rx) = Event::fetch(req);
     worker.exec(task).await.unwrap();
     let response = rx.await.unwrap();
 

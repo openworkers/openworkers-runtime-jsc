@@ -1,4 +1,4 @@
-use openworkers_core::{HttpMethod, HttpRequest, RequestBody, ResponseBody, Script, Task};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
@@ -14,7 +14,7 @@ async fn test_btoa_basic() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -25,7 +25,7 @@ async fn test_btoa_basic() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -45,7 +45,7 @@ async fn test_atob_basic() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -56,7 +56,7 @@ async fn test_atob_basic() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
@@ -96,7 +96,7 @@ async fn test_base64_roundtrip() {
     "#;
 
     let script_obj = Script::new(script);
-    let mut worker = Worker::new(script_obj, None, None)
+    let mut worker = Worker::new(script_obj, None)
         .await
         .expect("Worker should initialize");
 
@@ -107,7 +107,7 @@ async fn test_base64_roundtrip() {
         body: RequestBody::None,
     };
 
-    let (task, rx) = Task::fetch(request);
+    let (task, rx) = Event::fetch(request);
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");

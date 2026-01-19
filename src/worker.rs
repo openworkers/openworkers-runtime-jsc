@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
 use openworkers_core::{
-    HttpResponse, LogSender, RequestBody, ResponseBody, RuntimeLimits, Script, Task,
-    TerminationReason,
+    Event, HttpResponse, RequestBody, ResponseBody, RuntimeLimits, Script, TaskInit, TaskResult,
+    TaskSource, TerminationReason,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,10 +32,9 @@ impl Worker {
 }
 
 impl Worker {
-    /// Create a new worker with full options (openworkers-common compatible)
+    /// Create a new worker with full options (openworkers-core compatible)
     pub async fn new(
         script: Script,
-        log_tx: Option<LogSender>,
         _limits: Option<RuntimeLimits>,
     ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
@@ -46,13 +45,18 @@ impl Worker {
         // Setup environment variables
         setup_env(&mut runtime.context, &script.env);
 
-        // Setup console with log_tx
-        crate::runtime::bindings::setup_console(&mut runtime.context, log_tx);
+        // Setup console
+        crate::runtime::bindings::setup_console(&mut runtime.context);
 
         // TODO: Apply runtime limits
 
+        // Extract JavaScript code from WorkerCode
+        let js_code = script.code.as_js().ok_or_else(|| {
+            TerminationReason::Exception("Only JavaScript code is supported".to_string())
+        })?;
+
         // Load and evaluate the worker script
-        runtime.evaluate(&script.code).map_err(|e| {
+        runtime.evaluate(js_code).map_err(|e| {
             if let Ok(err_str) = e.to_js_string(&runtime.context) {
                 TerminationReason::Exception(format!("Script evaluation failed: {}", err_str))
             } else {
@@ -78,47 +82,47 @@ impl Worker {
         self.event_loop_handle.abort();
     }
 
-    /// Execute a task and return termination reason (openworkers-runtime compatible)
-    pub async fn exec(&mut self, mut task: Task) -> Result<(), TerminationReason> {
+    /// Execute an event and return termination reason (openworkers-core compatible)
+    pub async fn exec(&mut self, mut event: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
         }
 
-        match task {
-            Task::Fetch(ref mut init) => {
+        match event {
+            Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(
                     "FetchInit already consumed".to_string(),
                 ))?;
                 self.trigger_fetch_event(fetch_init).await?;
                 Ok(())
             }
-            Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or(TerminationReason::Other(
-                    "ScheduledInit already consumed".to_string(),
+            Event::Task(ref mut init) => {
+                let task_init = init.take().ok_or(TerminationReason::Other(
+                    "TaskInit already consumed".to_string(),
                 ))?;
-                self.trigger_scheduled_event(scheduled_init).await?;
+                self.trigger_task_event(task_init).await?;
                 Ok(())
             }
         }
     }
 
-    /// Execute a task and return the HTTP response directly
-    pub async fn exec_http(&mut self, mut task: Task) -> Result<HttpResponse, TerminationReason> {
-        match task {
-            Task::Fetch(ref mut init) => {
+    /// Execute an event and return the HTTP response directly
+    pub async fn exec_http(&mut self, mut event: Event) -> Result<HttpResponse, TerminationReason> {
+        match event {
+            Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(
                     "FetchInit already consumed".to_string(),
                 ))?;
                 self.trigger_fetch_event(fetch_init).await
             }
-            Task::Scheduled(ref mut init) => {
-                let scheduled_init = init.take().ok_or(TerminationReason::Other(
-                    "ScheduledInit already consumed".to_string(),
+            Event::Task(ref mut init) => {
+                let task_init = init.take().ok_or(TerminationReason::Other(
+                    "TaskInit already consumed".to_string(),
                 ))?;
-                self.trigger_scheduled_event(scheduled_init).await?;
+                self.trigger_task_event(task_init).await?;
 
-                // Return empty response for scheduled events
+                // Return empty response for task events
                 Ok(HttpResponse {
                     status: 200,
                     headers: vec![],
@@ -140,6 +144,7 @@ impl Worker {
         // Create Request object
         let body_str = match &req.body {
             RequestBody::Bytes(bytes) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
+            RequestBody::Stream(_) => String::new(), // Stream body not supported for now
             RequestBody::None => String::new(),
         };
 
@@ -370,16 +375,35 @@ impl Worker {
         })
     }
 
-    async fn trigger_scheduled_event(
-        &mut self,
-        scheduled_init: openworkers_core::ScheduledInit,
-    ) -> Result<(), TerminationReason> {
-        // Create event object
+    async fn trigger_task_event(&mut self, task_init: TaskInit) -> Result<(), TerminationReason> {
+        // Extract scheduled time if this is a schedule-triggered task
+        let scheduled_time = match &task_init.source {
+            Some(TaskSource::Schedule { time }) => Some(*time),
+            _ => None,
+        };
+
+        // Build event object with task info
+        let payload_json = task_init
+            .payload
+            .as_ref()
+            .map(|p| serde_json::to_string(p).unwrap_or_default())
+            .unwrap_or_else(|| "null".to_string());
+
+        let scheduled_time_js = scheduled_time
+            .map(|t| t.to_string())
+            .unwrap_or_else(|| "undefined".to_string());
+
         let event_script = format!(
             r#"({{
+                taskId: "{}",
+                attempt: {},
+                payload: {},
                 scheduledTime: {}
             }})"#,
-            scheduled_init.time
+            task_init.task_id.replace('"', "\\\""),
+            task_init.attempt,
+            payload_json,
+            scheduled_time_js
         );
 
         let event_obj = self
@@ -388,13 +412,15 @@ impl Worker {
             .evaluate_script(&event_script, 1)
             .map_err(|_| TerminationReason::Exception("Failed to create event".to_string()))?;
 
-        // Call trigger
+        // Try __taskHandler first, then fallback to __triggerScheduled for backward compat
         let trigger_script = r#"
             (function(event) {
-                if (typeof globalThis.__triggerScheduled === 'function') {
+                if (typeof globalThis.__taskHandler === 'function') {
+                    return globalThis.__taskHandler(event);
+                } else if (typeof globalThis.__triggerScheduled === 'function') {
                     return globalThis.__triggerScheduled(event);
                 }
-                throw new Error("No scheduled handler registered");
+                throw new Error("No task handler registered");
             })
         "#;
 
@@ -409,7 +435,7 @@ impl Worker {
         if let Err(e) = trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj]) {
             let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
                 let full_error = err_str.to_string();
-                log::error!("Scheduled handler exception: {}", full_error);
+                log::error!("Task handler exception: {}", full_error);
 
                 // Try to get stack trace
                 if let Ok(err_obj) = e.to_object(&self.runtime.context) {
@@ -420,31 +446,91 @@ impl Worker {
                     }
                 }
 
-                format!("Scheduled handler exception: {}", full_error)
+                format!("Task handler exception: {}", full_error)
             } else {
-                "Scheduled handler error (unknown)".to_string()
+                "Task handler error (unknown)".to_string()
             };
             return Err(TerminationReason::Exception(error_msg));
         }
 
-        // Process callbacks with adaptive polling
-        for iteration in 0..100 {
+        // Process callbacks with adaptive polling and check for __taskResult
+        for iteration in 0..500 {
             self.runtime.process_callbacks();
+
+            // Check if __requestComplete is set (handler finished including waitUntil)
+            let check_script = r#"
+                (function() {
+                    return globalThis.__requestComplete === true;
+                })()
+            "#;
+
+            if let Ok(result) = self.runtime.context.evaluate_script(check_script, 1) {
+                if result.to_bool(&self.runtime.context) {
+                    break;
+                }
+            }
 
             // Adaptive sleep
             let sleep_duration = if iteration < 10 {
                 tokio::time::Duration::from_micros(1)
-            } else if iteration < 50 {
+            } else if iteration < 110 {
                 tokio::time::Duration::from_millis(1)
             } else {
                 tokio::time::Duration::from_millis(10)
             };
 
             tokio::time::sleep(sleep_duration).await;
+
+            if iteration == 499 {
+                return Err(TerminationReason::WallClockTimeout);
+            }
         }
 
-        // Send completion
-        let _ = scheduled_init.res_tx.send(());
+        // Extract __taskResult from JS
+        let extract_script = r#"
+            (function() {
+                const result = globalThis.__taskResult;
+                if (!result || typeof result !== 'object') {
+                    return JSON.stringify({ success: true });
+                }
+                return JSON.stringify({
+                    success: result.success !== false,
+                    data: result.data,
+                    error: result.error
+                });
+            })()
+        "#;
+
+        let task_result =
+            if let Ok(result_val) = self.runtime.context.evaluate_script(extract_script, 1) {
+                if let Ok(result_str) = result_val.to_js_string(&self.runtime.context) {
+                    let json_str = result_str.to_string();
+
+                    #[derive(serde::Deserialize)]
+                    struct ExtractedResult {
+                        success: bool,
+                        data: Option<serde_json::Value>,
+                        error: Option<String>,
+                    }
+
+                    if let Ok(extracted) = serde_json::from_str::<ExtractedResult>(&json_str) {
+                        TaskResult {
+                            success: extracted.success,
+                            data: extracted.data,
+                            error: extracted.error,
+                        }
+                    } else {
+                        TaskResult::success()
+                    }
+                } else {
+                    TaskResult::success()
+                }
+            } else {
+                TaskResult::success()
+            };
+
+        // Send result
+        let _ = task_init.res_tx.send(task_result);
 
         Ok(())
     }
@@ -581,17 +667,76 @@ fn setup_event_listener(
                 };
             } else if (type === 'scheduled') {
                 globalThis.__triggerScheduled = async function(event) {
+                    globalThis.__requestComplete = false;
                     const promises = [];
+
                     event.waitUntil = function(promise) {
-                        promises.push(promise);
+                        promises.push(Promise.resolve(promise));
                     };
 
-                    // Call handler
-                    await handler(event);
+                    try {
+                        // Call handler
+                        await handler(event);
 
-                    // Wait for all promises
-                    if (promises.length > 0) {
-                        await Promise.all(promises);
+                        // Wait for all promises
+                        if (promises.length > 0) {
+                            await Promise.all(promises);
+                        }
+                    } finally {
+                        globalThis.__requestComplete = true;
+                    }
+                };
+            } else if (type === 'task') {
+                globalThis.__taskHandler = async function(event) {
+                    globalThis.__requestComplete = false;
+                    const waitUntilPromises = [];
+
+                    // Default result (success with no data)
+                    globalThis.__taskResult = { success: true };
+
+                    event.waitUntil = function(promise) {
+                        waitUntilPromises.push(Promise.resolve(promise));
+                    };
+
+                    event.respondWith = function(result) {
+                        if (result && typeof result === 'object') {
+                            globalThis.__taskResult = {
+                                success: result.success !== false,
+                                data: result.data,
+                                error: result.error
+                            };
+                        } else {
+                            globalThis.__taskResult = { success: true, data: result };
+                        }
+                    };
+
+                    try {
+                        const result = await handler(event);
+
+                        // If handler returns a value and respondWith wasn't called, use it
+                        if (result !== undefined && globalThis.__taskResult.data === undefined) {
+                            if (result && typeof result === 'object' && 'success' in result) {
+                                globalThis.__taskResult = {
+                                    success: result.success !== false,
+                                    data: result.data,
+                                    error: result.error
+                                };
+                            } else {
+                                globalThis.__taskResult = { success: true, data: result };
+                            }
+                        }
+
+                        // Wait for all waitUntil promises to complete
+                        if (waitUntilPromises.length > 0) {
+                            await Promise.all(waitUntilPromises);
+                        }
+                    } catch (error) {
+                        globalThis.__taskResult = {
+                            success: false,
+                            error: error.message || String(error)
+                        };
+                    } finally {
+                        globalThis.__requestComplete = true;
                     }
                 };
             }
@@ -638,16 +783,12 @@ fn setup_env(
 }
 
 impl openworkers_core::Worker for Worker {
-    async fn new(
-        script: Script,
-        log_tx: Option<LogSender>,
-        limits: Option<RuntimeLimits>,
-    ) -> Result<Self, TerminationReason> {
-        Worker::new(script, log_tx, limits).await
+    async fn new(script: Script, limits: Option<RuntimeLimits>) -> Result<Self, TerminationReason> {
+        Worker::new(script, limits).await
     }
 
-    async fn exec(&mut self, task: Task) -> Result<(), TerminationReason> {
-        Worker::exec(self, task).await
+    async fn exec(&mut self, event: Event) -> Result<(), TerminationReason> {
+        Worker::exec(self, event).await
     }
 
     fn abort(&mut self) {

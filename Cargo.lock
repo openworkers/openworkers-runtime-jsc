@@ -1299,12 +1299,13 @@ checksum = "d6790f58c7ff633d8771f42965289203411a5e5c68388703c06e14f24770b41e"
 
 [[package]]
 name = "openworkers-core"
-version = "0.5.1"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.5.1#147da6d6653a52527c4a38d8262cf6150c177499"
+version = "0.10.0"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.10.0#5ba3a80392ca5e77744ceabf0a68836c1903dd5a"
 dependencies = [
  "actix-web",
  "bytes",
  "serde",
+ "serde_json",
  "tokio",
  "tokio-stream",
 ]

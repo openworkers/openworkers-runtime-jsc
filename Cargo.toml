@@ -1,6 +1,6 @@
 [package]
 name = "openworkers-runtime-jsc"
-version = "0.5.3"
+version = "0.10.0"
 edition = "2024"
 
 [features]
@@ -9,7 +9,7 @@ actix = ["dep:actix-web", "openworkers-core/actix"]
 [dependencies]
 # Common types
 # openworkers-core = { path = "../openworkers-core", features = ["testing"] }
-openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.5.1", features = ["testing"] }
+openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.10.0" }
 
 # JSCore runtime (using local fork)
 rusty_jsc = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7" }
