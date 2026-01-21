@@ -1,5 +1,6 @@
 mod base64;
 pub mod bindings;
+mod crypto;
 pub mod fetch;
 mod headers;
 mod request;
@@ -124,6 +125,9 @@ impl Runtime {
 
         // Setup URL API
         url::setup_url_api(&mut context);
+
+        // Setup crypto API
+        crypto::setup_crypto(&mut context);
 
         // Setup fetch API
         bindings::setup_fetch(
