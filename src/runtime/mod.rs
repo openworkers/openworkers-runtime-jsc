@@ -11,7 +11,7 @@ mod text_encoding;
 mod url;
 
 // Re-export fetch functions for internal use
-pub use fetch::{execute_fetch_streaming, parse_fetch_options};
+pub use fetch::parse_fetch_options;
 
 use openworkers_core::{HttpRequest, HttpResponseMeta};
 use rusty_jsc::{JSContext, JSObject, JSValue};
