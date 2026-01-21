@@ -1,7 +1,7 @@
 use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
 use openworkers_core::{
-    Event, HttpResponse, RequestBody, ResponseBody, RuntimeLimits, Script, TaskInit, TaskResult,
-    TaskSource, TerminationReason,
+    Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
+    TaskInit, TaskResult, TaskSource, TerminationReason,
 };
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -32,10 +32,13 @@ impl Worker {
 }
 
 impl Worker {
-    /// Create a new worker with full options (openworkers-core compatible)
-    pub async fn new(
+    /// Create a new worker with an OperationsHandler
+    ///
+    /// All operations (fetch, log, etc.) go through the runner's OperationsHandler.
+    pub async fn new_with_ops(
         script: Script,
         _limits: Option<RuntimeLimits>,
+        ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
@@ -66,7 +69,7 @@ impl Worker {
 
         // Start event loop in background
         let event_loop_handle = tokio::spawn(async move {
-            run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
+            run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
         });
 
         Ok(Self {
@@ -74,6 +77,18 @@ impl Worker {
             event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
         })
+    }
+
+    /// Create a new worker with default operations (standalone mode)
+    ///
+    /// Uses DefaultOps which returns errors for all operations.
+    /// For production, use `new_with_ops` with a proper OperationsHandler.
+    pub async fn new(
+        script: Script,
+        limits: Option<RuntimeLimits>,
+    ) -> Result<Self, TerminationReason> {
+        let ops: OperationsHandle = Arc::new(openworkers_core::DefaultOps);
+        Self::new_with_ops(script, limits, ops).await
     }
 
     /// Abort the worker execution

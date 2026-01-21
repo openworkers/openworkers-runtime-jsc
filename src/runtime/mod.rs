@@ -439,6 +439,7 @@ pub async fn run_event_loop(
     mut scheduler_rx: mpsc::UnboundedReceiver<SchedulerMessage>,
     callback_tx: mpsc::UnboundedSender<CallbackMessage>,
     stream_manager: Arc<stream_manager::StreamManager>,
+    ops: openworkers_core::OperationsHandle,
 ) {
     use std::collections::HashMap;
     use tokio::task::JoinHandle;
@@ -501,8 +502,10 @@ pub async fn run_event_loop(
 
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
+                let ops = ops.clone();
+
                 tokio::spawn(async move {
-                    match fetch::execute_fetch_streaming(request, manager).await {
+                    match execute_fetch_via_ops(request, manager, ops).await {
                         Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
                                 promise_id, meta, stream_id,
@@ -549,6 +552,97 @@ pub async fn run_event_loop(
                 break;
             }
         }
+    }
+}
+
+/// Execute fetch via OperationsHandler
+async fn execute_fetch_via_ops(
+    request: openworkers_core::HttpRequest,
+    stream_manager: Arc<stream_manager::StreamManager>,
+    ops: openworkers_core::OperationsHandle,
+) -> Result<(openworkers_core::HttpResponseMeta, stream_manager::StreamId), String> {
+    use openworkers_core::{Operation, OperationResult, ResponseBody};
+
+    let result = ops.handle(Operation::Fetch(request)).await;
+
+    let response = match result {
+        OperationResult::Http(r) => r?,
+        _ => return Err("Unexpected result type for fetch".into()),
+    };
+
+    let meta = openworkers_core::HttpResponseMeta {
+        status: response.status,
+        status_text: status_text(response.status),
+        headers: response.headers.into_iter().collect(),
+    };
+
+    let stream_id = stream_manager.create_stream("ops_fetch".to_string());
+
+    match response.body {
+        ResponseBody::None => {
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Bytes(bytes) => {
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                .await;
+            let _ = stream_manager
+                .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                .await;
+        }
+        ResponseBody::Stream(mut rx) => {
+            let manager = stream_manager.clone();
+
+            tokio::spawn(async move {
+                while let Some(result) = rx.recv().await {
+                    match result {
+                        Ok(bytes) => {
+                            if manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Data(bytes))
+                                .await
+                                .is_err()
+                            {
+                                break;
+                            }
+                        }
+                        Err(e) => {
+                            let _ = manager
+                                .write_chunk(stream_id, stream_manager::StreamChunk::Error(e))
+                                .await;
+                            break;
+                        }
+                    }
+                }
+
+                let _ = manager
+                    .write_chunk(stream_id, stream_manager::StreamChunk::Done)
+                    .await;
+            });
+        }
+    }
+
+    Ok((meta, stream_id))
+}
+
+/// Get HTTP status text
+fn status_text(status: u16) -> String {
+    match status {
+        200 => "OK".to_string(),
+        201 => "Created".to_string(),
+        204 => "No Content".to_string(),
+        301 => "Moved Permanently".to_string(),
+        302 => "Found".to_string(),
+        304 => "Not Modified".to_string(),
+        400 => "Bad Request".to_string(),
+        401 => "Unauthorized".to_string(),
+        403 => "Forbidden".to_string(),
+        404 => "Not Found".to_string(),
+        500 => "Internal Server Error".to_string(),
+        502 => "Bad Gateway".to_string(),
+        503 => "Service Unavailable".to_string(),
+        _ => "Unknown".to_string(),
     }
 }
 

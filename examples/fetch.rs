@@ -2,7 +2,8 @@
 //
 // To run: cargo run --example fetch
 
-use openworkers_runtime_jsc::{Runtime, run_event_loop};
+use openworkers_runtime_jsc::{DefaultOps, OperationsHandle, Runtime, run_event_loop};
+use std::sync::Arc;
 use std::time::Duration;
 
 #[tokio::main]
@@ -13,10 +14,11 @@ async fn main() {
 
     // Create runtime and event loop
     let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
+    let ops: OperationsHandle = Arc::new(DefaultOps);
 
     // Spawn the background event loop
     let event_loop_handle = tokio::spawn(async move {
-        run_event_loop(scheduler_rx, callback_tx, stream_manager).await;
+        run_event_loop(scheduler_rx, callback_tx, stream_manager, ops).await;
     });
 
     // Execute JavaScript with fetch

@@ -1,11 +1,69 @@
 mod common;
 
 use common::TestRunner;
+use openworkers_runtime_jsc::{
+    HttpRequest, HttpResponse, OpFuture, OperationsHandle, OperationsHandler, ResponseBody,
+};
+use std::sync::Arc;
 use std::time::Duration;
+
+/// Mock operations handler for fetch tests
+struct MockOps;
+
+impl OperationsHandler for MockOps {
+    fn handle_fetch(&self, request: HttpRequest) -> OpFuture<'_, Result<HttpResponse, String>> {
+        Box::pin(async move {
+            // Parse the URL to determine the mock response
+            let url = &request.url;
+
+            if url.contains("/status/404") {
+                return Ok(HttpResponse {
+                    status: 404,
+                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                    body: ResponseBody::Bytes("Not Found".into()),
+                });
+            }
+
+            if url.contains("/json") {
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "application/json".to_string())],
+                    body: ResponseBody::Bytes(r#"{"message":"hello","value":42}"#.into()),
+                });
+            }
+
+            if url.contains("/post") {
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![("content-type".to_string(), "text/plain".to_string())],
+                    body: ResponseBody::Bytes("POST received".into()),
+                });
+            }
+
+            // Default: return a mock JSON response for /get and other paths
+            let body = format!(
+                r#"{{"url":"{}","method":"{:?}","headers":{}}}"#,
+                request.url,
+                request.method,
+                serde_json::to_string(&request.headers).unwrap_or_default()
+            );
+
+            Ok(HttpResponse {
+                status: 200,
+                headers: vec![("content-type".to_string(), "application/json".to_string())],
+                body: ResponseBody::Bytes(body.into()),
+            })
+        })
+    }
+}
+
+fn ops() -> OperationsHandle {
+    Arc::new(MockOps)
+}
 
 #[tokio::test]
 async fn test_fetch_basic_get() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.fetchResult = null;
@@ -54,7 +112,7 @@ async fn test_fetch_basic_get() {
 
 #[tokio::test]
 async fn test_fetch_with_text() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.textResult = null;
@@ -90,7 +148,7 @@ async fn test_fetch_with_text() {
 
 #[tokio::test]
 async fn test_fetch_404_error() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.notFoundResult = null;
@@ -138,7 +196,7 @@ async fn test_fetch_404_error() {
 
 #[tokio::test]
 async fn test_fetch_json() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.jsonResult = null;
@@ -178,7 +236,7 @@ async fn test_fetch_json() {
 
 #[tokio::test]
 async fn test_fetch_with_custom_method() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.methodResult = null;
@@ -221,7 +279,7 @@ async fn test_fetch_with_custom_method() {
 
 #[tokio::test]
 async fn test_fetch_post_with_body() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.postResult = null;
@@ -278,7 +336,7 @@ async fn test_fetch_post_with_body() {
 
 #[tokio::test]
 async fn test_response_headers_api() {
-    let mut runner = TestRunner::new();
+    let mut runner = TestRunner::new_with_ops(ops());
 
     let script = r#"
         globalThis.headersApiResult = null;
