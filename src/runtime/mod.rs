@@ -177,11 +177,10 @@ impl Runtime {
         }
     }
 
-    /// Execute a single callback message against the JS context
     pub fn handle_callback(&mut self, msg: CallbackMessage) {
         match msg {
             CallbackMessage::ExecuteTimeout(callback_id) => {
-                // Timeouts are one-shot: remove the callback after execution
+                // Timeouts are one-shot, intervals are not
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -190,7 +189,6 @@ impl Runtime {
                 if let Some(callback) = callback_opt {
                     log::debug!("Executing timeout callback {}", callback_id);
 
-                    // Call the callback
                     match callback.call_as_function(&self.context, None, &[]) {
                         Ok(_) => log::debug!("Callback {} executed successfully", callback_id),
                         Err(e) => {
@@ -204,7 +202,6 @@ impl Runtime {
                 }
             }
             CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
-                // Execute resolve callback with result
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -225,7 +222,6 @@ impl Runtime {
                 }
             }
             CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
-                // Execute reject callback with error
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -246,7 +242,6 @@ impl Runtime {
                 }
             }
             CallbackMessage::FetchError(callback_id, error_msg) => {
-                // Execute fetch reject callback
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -267,14 +262,12 @@ impl Runtime {
                 }
             }
             CallbackMessage::ExecuteInterval(callback_id) => {
-                // Intervals keep the callback for repeated execution
                 let callback_opt = {
                     let cbs = self.callbacks.borrow();
                     cbs.get(&callback_id).cloned()
                 };
 
                 if let Some(callback) = callback_opt {
-                    // Check if interval is still active
                     let is_active = {
                         let intervals = self.intervals.lock().unwrap();
                         intervals.contains(&callback_id)
@@ -287,7 +280,6 @@ impl Runtime {
 
                     log::debug!("Executing interval callback {}", callback_id);
 
-                    // Call the callback
                     match callback.call_as_function(&self.context, None, &[]) {
                         Ok(_) => log::debug!("Interval {} executed successfully", callback_id),
                         Err(e) => {
@@ -301,7 +293,6 @@ impl Runtime {
                 }
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                // Execute fetch resolve callback with a full Response object
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -314,7 +305,6 @@ impl Runtime {
                         stream_id
                     );
 
-                    // Create a Response with streaming body using __createNativeStream
                     let headers_json =
                         serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
                     let response_script = format!(
@@ -346,7 +336,6 @@ impl Runtime {
                 }
             }
             CallbackMessage::StreamChunk(callback_id, chunk) => {
-                // Execute stream read callback with chunk result
                 let callback_opt = {
                     let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
@@ -355,7 +344,6 @@ impl Runtime {
                 if let Some(callback) = callback_opt {
                     log::debug!("Executing stream chunk callback {}", callback_id);
 
-                    // Create result object based on chunk type
                     let result = match chunk {
                         stream_manager::StreamChunk::Data(bytes) => self.make_chunk_result(&bytes),
                         stream_manager::StreamChunk::Done => self
@@ -395,7 +383,7 @@ impl Runtime {
         self.context.evaluate_script(script, 1)
     }
 
-    /// Copy bytes into a JS-owned Uint8Array; source text is not binary-safe
+    /// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`
     pub(crate) fn new_uint8_array(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
         let script = format!("new Uint8Array({})", bytes.len());
         let array = self.context.evaluate_script(&script, 1)?;
@@ -406,7 +394,7 @@ impl Runtime {
 
         let array_obj = array.to_object(&self.context)?;
 
-        // Safe: the buffer is only written here, before any further JSC call
+        // SAFETY: the pointer stays valid as long as no JSC call runs, and none does here
         let buffer = unsafe { array_obj.get_typed_array_buffer(&self.context)? };
         buffer.copy_from_slice(bytes);
 

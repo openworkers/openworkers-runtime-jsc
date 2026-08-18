@@ -4,10 +4,6 @@ use rusty_jsc::{JSContext, JSObject, JSValue};
 use std::collections::HashMap;
 use std::str::FromStr;
 
-// ============================================================================
-// Headers
-// ============================================================================
-
 /// Parse headers from JS options object
 pub fn parse_headers_from_js(
     context: &JSContext,
@@ -28,7 +24,6 @@ pub fn parse_headers_from_js(
         .to_object(context)
         .map_err(|_| "Headers must be an object")?;
 
-    // Get all property names
     let prop_names = headers_obj.get_property_names(context);
 
     for prop_name in prop_names {
@@ -41,10 +36,6 @@ pub fn parse_headers_from_js(
 
     Ok(headers)
 }
-
-// ============================================================================
-// Request
-// ============================================================================
 
 /// Read a property, treating `null` and `undefined` as absent
 fn defined_property(context: &JSContext, obj: &JSObject, name: &str) -> Option<JSValue> {
@@ -72,7 +63,6 @@ pub fn parse_fetch_options(
             .to_object(context)
             .map_err(|_| "Options must be an object")?;
 
-        // Parse method
         if let Some(method_val) = defined_property(context, &options_obj, "method")
             && let Ok(method_str) = method_val.to_js_string(context)
         {
@@ -80,12 +70,10 @@ pub fn parse_fetch_options(
                 .map_err(|_| format!("Invalid HTTP method: {}", method_str))?;
         }
 
-        // Parse headers
         if let Some(headers_val) = defined_property(context, &options_obj, "headers") {
             headers = parse_headers_from_js(context, headers_val)?;
         }
 
-        // Parse body
         if let Some(body_val) = defined_property(context, &options_obj, "body")
             && let Ok(body_str) = body_val.to_js_string(context)
         {

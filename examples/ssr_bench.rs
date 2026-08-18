@@ -1,6 +1,4 @@
-// SSR benchmark: wake a worker, render a SvelteKit page, return HTML, sleep.
-//
-// To run: cargo run --release --example ssr_bench
+// cargo run --release --example ssr_bench
 //
 // SSR_BUNDLE overrides the fixture, SSR_OUT writes the rendered page to a file.
 

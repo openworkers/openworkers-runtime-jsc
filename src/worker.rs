@@ -478,7 +478,6 @@ fn setup_event_listener(
     context: &mut rusty_jsc::JSContext,
     completion_tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 ) {
-    // Setup native __completeEvent function
     let completion_tx_clone = completion_tx.clone();
     let complete_event_callback = rusty_jsc::callback_closure!(
         context,
@@ -493,7 +492,6 @@ fn setup_event_listener(
             if let Ok(result_json) = args[0].to_js_string(&ctx) {
                 let result_str = result_json.to_string();
 
-                // Send the event result through the channel
                 if let Some(tx) = completion_tx_clone.lock().unwrap().take() {
                     let _ = tx.send(result_str);
                 }
@@ -549,7 +547,6 @@ fn setup_event_listener(
             return response;
         };
 
-        // Extract the metadata sent back to Rust once a response is ready
         globalThis.__extractResponseMeta = function(resp) {
             const headers = [];
             if (resp.headers) {
@@ -574,7 +571,6 @@ fn setup_event_listener(
             };
         };
 
-        // Stream the response body, then complete the fetch event
         globalThis.__finishFetch = function(response) {
             return __streamResponseBody(response).then(resp => {
                 __completeEvent(JSON.stringify(__extractResponseMeta(resp)));
