@@ -12,6 +12,19 @@ struct MockOps;
 impl OperationsHandler for MockOps {
     fn handle_fetch(&self, request: HttpRequest) -> OpFuture<'_, Result<HttpResponse, String>> {
         Box::pin(async move {
+            if request.url.contains("/binary") {
+                let bytes: Vec<u8> = (0u8..=255).collect();
+
+                return Ok(HttpResponse {
+                    status: 200,
+                    headers: vec![(
+                        "content-type".to_string(),
+                        "application/octet-stream".to_string(),
+                    )],
+                    body: ResponseBody::Bytes(bytes.into()),
+                });
+            }
+
             // Return a mock response based on the URL
             let body = format!(
                 r#"{{"url":"{}","method":"{:?}","headers":{}}}"#,
@@ -100,6 +113,45 @@ async fn test_fetch_forward_headers() {
 
     assert_eq!(response.status, 200);
     assert!(!response.headers.is_empty(), "Should have headers");
+}
+
+/// Every byte value must survive the Rust -> JS chunk path unchanged
+#[tokio::test]
+async fn test_fetch_binary_roundtrip() {
+    let script = r#"
+        addEventListener('fetch', async (event) => {
+            const response = await fetch('https://echo.workers.rocks/binary');
+            const bytes = new Uint8Array(await response.arrayBuffer());
+            event.respondWith(new Response(bytes));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new_with_ops(script_obj, None, ops())
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/test".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = tokio::time::timeout(std::time::Duration::from_secs(10), rx)
+        .await
+        .expect("Should receive response within timeout")
+        .expect("Channel should not close");
+
+    assert_eq!(response.status, 200);
+
+    let body = response.body.collect().await.expect("Should have body");
+    let expected: Vec<u8> = (0u8..=255).collect();
+
+    assert_eq!(&body[..], &expected[..]);
 }
 
 /// Test streaming response body with _nativeStreamId detection

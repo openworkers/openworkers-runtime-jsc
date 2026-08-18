@@ -377,28 +377,19 @@ impl Runtime {
                     log::debug!("Executing stream chunk callback {}", callback_id);
 
                     // Create result object based on chunk type
-                    let result_script = match chunk {
-                        stream_manager::StreamChunk::Data(bytes) => {
-                            // Convert bytes to Uint8Array
-                            let bytes_array: Vec<u8> = bytes.to_vec();
-                            let bytes_str = format!("{:?}", bytes_array);
-                            format!(
-                                r#"({{
-                                        done: false,
-                                        value: new Uint8Array({})
-                                    }})"#,
-                                bytes_str
-                            )
-                        }
-                        stream_manager::StreamChunk::Done => {
-                            r#"({ done: true, value: undefined })"#.to_string()
-                        }
+                    let result = match chunk {
+                        stream_manager::StreamChunk::Data(bytes) => self.make_chunk_result(&bytes),
+                        stream_manager::StreamChunk::Done => self
+                            .context
+                            .evaluate_script("({ done: true, value: undefined })", 1),
                         stream_manager::StreamChunk::Error(err) => {
-                            format!(r#"({{ error: "{}" }})"#, err.replace('"', "\\\""))
+                            let err_json = serde_json::to_string(&err).unwrap();
+                            self.context
+                                .evaluate_script(&format!("({{ error: {} }})", err_json), 1)
                         }
                     };
 
-                    match self.context.evaluate_script(&result_script, 1) {
+                    match result {
                         Ok(result_obj) => {
                             match callback.call_as_function(&self.context, None, &[result_obj]) {
                                 Ok(_) => log::debug!("Stream chunk callback executed"),
@@ -423,6 +414,32 @@ impl Runtime {
     /// Evaluate a JavaScript script
     pub fn evaluate(&mut self, script: &str) -> Result<JSValue, JSValue> {
         self.context.evaluate_script(script, 1)
+    }
+
+    /// Build a `{ done: false, value: Uint8Array }` stream result, copying the
+    /// bytes into a JS-owned buffer instead of formatting them into source text
+    fn make_chunk_result(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
+        let script = format!(
+            "({{ done: false, value: new Uint8Array({}) }})",
+            bytes.len()
+        );
+        let result_val = self.context.evaluate_script(&script, 1)?;
+
+        if bytes.is_empty() {
+            return Ok(result_val);
+        }
+
+        let value_obj = result_val
+            .to_object(&self.context)?
+            .get_property(&self.context, "value")
+            .ok_or_else(|| JSValue::string(&self.context, "missing chunk value"))?
+            .to_object(&self.context)?;
+
+        // Safe: the buffer is only written here, before any further JSC call
+        let buffer = unsafe { value_obj.get_typed_array_buffer(&self.context)? };
+        buffer.copy_from_slice(bytes);
+
+        Ok(result_val)
     }
 }
 
