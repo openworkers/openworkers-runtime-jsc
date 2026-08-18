@@ -74,8 +74,8 @@ pub struct Runtime {
     pub(crate) next_callback_id: Arc<Mutex<CallbackId>>,
     /// Track which callbacks are intervals (vs timeouts) - shared with bindings
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
-    /// Sender for fetch response (set during fetch execution)
-    pub(crate) fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
+    /// Sender for the in-flight event result (set during fetch/task execution)
+    pub(crate) completion_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// Stream manager for handling streaming responses
     #[allow(dead_code)]
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
@@ -96,7 +96,7 @@ impl Runtime {
         let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
         let intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
-        let fetch_response_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>> =
+        let completion_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>> =
             Arc::new(Mutex::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
@@ -164,7 +164,7 @@ impl Runtime {
             callbacks,
             next_callback_id,
             intervals,
-            fetch_response_tx,
+            completion_tx,
             stream_manager: stream_manager.clone(),
         };
 
@@ -188,152 +188,152 @@ impl Runtime {
     /// Process pending callbacks (non-blocking)
     pub fn process_callbacks(&mut self) {
         while let Ok(msg) = self.callback_rx.try_recv() {
-            match msg {
-                CallbackMessage::ExecuteTimeout(callback_id) => {
-                    // Timeouts are one-shot: remove the callback after execution
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            self.handle_callback(msg);
+        }
+    }
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Executing timeout callback {}", callback_id);
+    /// Execute a single callback message against the JS context
+    pub fn handle_callback(&mut self, msg: CallbackMessage) {
+        match msg {
+            CallbackMessage::ExecuteTimeout(callback_id) => {
+                // Timeouts are one-shot: remove the callback after execution
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                        // Call the callback
-                        match callback.call_as_function(&self.context, None, &[]) {
-                            Ok(_) => log::debug!("Callback {} executed successfully", callback_id),
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Callback {} failed: {}", callback_id, err_str);
-                                } else {
-                                    log::error!(
-                                        "Callback {} failed with unknown error",
-                                        callback_id
-                                    );
-                                }
+                if let Some(callback) = callback_opt {
+                    log::debug!("Executing timeout callback {}", callback_id);
+
+                    // Call the callback
+                    match callback.call_as_function(&self.context, None, &[]) {
+                        Ok(_) => log::debug!("Callback {} executed successfully", callback_id),
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Callback {} failed: {}", callback_id, err_str);
+                            } else {
+                                log::error!("Callback {} failed with unknown error", callback_id);
                             }
                         }
                     }
                 }
-                CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
-                    // Execute resolve callback with result
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            }
+            CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
+                // Execute resolve callback with result
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Executing promise resolve callback {}", callback_id);
+                if let Some(callback) = callback_opt {
+                    log::debug!("Executing promise resolve callback {}", callback_id);
 
-                        let result_val = JSValue::string(&self.context, result_str.as_str());
-                        match callback.call_as_function(&self.context, None, &[result_val]) {
-                            Ok(_) => log::debug!("Promise resolved successfully"),
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Promise resolve failed: {}", err_str);
-                                }
+                    let result_val = JSValue::string(&self.context, result_str.as_str());
+                    match callback.call_as_function(&self.context, None, &[result_val]) {
+                        Ok(_) => log::debug!("Promise resolved successfully"),
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Promise resolve failed: {}", err_str);
                             }
                         }
                     }
                 }
-                CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
-                    // Execute reject callback with error
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            }
+            CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
+                // Execute reject callback with error
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Executing promise reject callback {}", callback_id);
+                if let Some(callback) = callback_opt {
+                    log::debug!("Executing promise reject callback {}", callback_id);
 
-                        let error_val = JSValue::string(&self.context, error_msg.as_str());
-                        match callback.call_as_function(&self.context, None, &[error_val]) {
-                            Ok(_) => log::debug!("Promise rejected successfully"),
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Promise reject failed: {}", err_str);
-                                }
+                    let error_val = JSValue::string(&self.context, error_msg.as_str());
+                    match callback.call_as_function(&self.context, None, &[error_val]) {
+                        Ok(_) => log::debug!("Promise rejected successfully"),
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Promise reject failed: {}", err_str);
                             }
                         }
                     }
                 }
-                CallbackMessage::FetchError(callback_id, error_msg) => {
-                    // Execute fetch reject callback
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            }
+            CallbackMessage::FetchError(callback_id, error_msg) => {
+                // Execute fetch reject callback
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Rejecting fetch promise {}: {}", callback_id, error_msg);
+                if let Some(callback) = callback_opt {
+                    log::debug!("Rejecting fetch promise {}: {}", callback_id, error_msg);
 
-                        let error_val = JSValue::string(&self.context, error_msg.as_str());
-                        match callback.call_as_function(&self.context, None, &[error_val]) {
-                            Ok(_) => log::debug!("Fetch promise rejected successfully"),
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Fetch reject callback failed: {}", err_str);
-                                }
+                    let error_val = JSValue::string(&self.context, error_msg.as_str());
+                    match callback.call_as_function(&self.context, None, &[error_val]) {
+                        Ok(_) => log::debug!("Fetch promise rejected successfully"),
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Fetch reject callback failed: {}", err_str);
                             }
                         }
                     }
                 }
-                CallbackMessage::ExecuteInterval(callback_id) => {
-                    // Intervals keep the callback for repeated execution
-                    let callback_opt = {
-                        let cbs = self.callbacks.lock().unwrap();
-                        cbs.get(&callback_id).cloned()
+            }
+            CallbackMessage::ExecuteInterval(callback_id) => {
+                // Intervals keep the callback for repeated execution
+                let callback_opt = {
+                    let cbs = self.callbacks.lock().unwrap();
+                    cbs.get(&callback_id).cloned()
+                };
+
+                if let Some(callback) = callback_opt {
+                    // Check if interval is still active
+                    let is_active = {
+                        let intervals = self.intervals.lock().unwrap();
+                        intervals.contains(&callback_id)
                     };
 
-                    if let Some(callback) = callback_opt {
-                        // Check if interval is still active
-                        let is_active = {
-                            let intervals = self.intervals.lock().unwrap();
-                            intervals.contains(&callback_id)
-                        };
+                    if !is_active {
+                        log::debug!("Interval {} was cleared, skipping execution", callback_id);
+                        return;
+                    }
 
-                        if !is_active {
-                            log::debug!("Interval {} was cleared, skipping execution", callback_id);
-                            continue;
-                        }
+                    log::debug!("Executing interval callback {}", callback_id);
 
-                        log::debug!("Executing interval callback {}", callback_id);
-
-                        // Call the callback
-                        match callback.call_as_function(&self.context, None, &[]) {
-                            Ok(_) => log::debug!("Interval {} executed successfully", callback_id),
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Interval {} failed: {}", callback_id, err_str);
-                                } else {
-                                    log::error!(
-                                        "Interval {} failed with unknown error",
-                                        callback_id
-                                    );
-                                }
+                    // Call the callback
+                    match callback.call_as_function(&self.context, None, &[]) {
+                        Ok(_) => log::debug!("Interval {} executed successfully", callback_id),
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Interval {} failed: {}", callback_id, err_str);
+                            } else {
+                                log::error!("Interval {} failed with unknown error", callback_id);
                             }
                         }
                     }
                 }
-                CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                    // Execute fetch resolve callback with a full Response object
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            }
+            CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
+                // Execute fetch resolve callback with a full Response object
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!(
-                            "Resolving fetch streaming promise {} with stream {}",
-                            callback_id,
-                            stream_id
-                        );
+                if let Some(callback) = callback_opt {
+                    log::debug!(
+                        "Resolving fetch streaming promise {} with stream {}",
+                        callback_id,
+                        stream_id
+                    );
 
-                        // Create a Response with streaming body using __createNativeStream
-                        let headers_json =
-                            serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
-                        let response_script = format!(
-                            r#"(function() {{
+                    // Create a Response with streaming body using __createNativeStream
+                    let headers_json =
+                        serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
+                    let response_script = format!(
+                        r#"(function() {{
                                 const stream = __createNativeStream({});
                                 const response = new Response(stream, {{
                                     status: {},
@@ -344,86 +344,74 @@ impl Runtime {
                                 response._isStreaming = true;
                                 return response;
                             }})()"#,
-                            stream_id, meta.status, meta.status_text, headers_json
-                        );
+                        stream_id, meta.status, meta.status_text, headers_json
+                    );
 
-                        match self.context.evaluate_script(&response_script, 1) {
-                            Ok(response_obj) => {
-                                match callback.call_as_function(
-                                    &self.context,
-                                    None,
-                                    &[response_obj],
-                                ) {
-                                    Ok(_) => log::debug!("Fetch streaming resolved successfully"),
-                                    Err(e) => {
-                                        if let Ok(err_str) = e.to_js_string(&self.context) {
-                                            log::error!(
-                                                "Fetch streaming callback failed: {}",
-                                                err_str
-                                            );
-                                        }
+                    match self.context.evaluate_script(&response_script, 1) {
+                        Ok(response_obj) => {
+                            match callback.call_as_function(&self.context, None, &[response_obj]) {
+                                Ok(_) => log::debug!("Fetch streaming resolved successfully"),
+                                Err(e) => {
+                                    if let Ok(err_str) = e.to_js_string(&self.context) {
+                                        log::error!("Fetch streaming callback failed: {}", err_str);
                                     }
                                 }
                             }
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Failed to create streaming Response: {}", err_str);
-                                }
+                        }
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Failed to create streaming Response: {}", err_str);
                             }
                         }
                     }
                 }
-                CallbackMessage::StreamChunk(callback_id, chunk) => {
-                    // Execute stream read callback with chunk result
-                    let callback_opt = {
-                        let mut cbs = self.callbacks.lock().unwrap();
-                        cbs.remove(&callback_id)
-                    };
+            }
+            CallbackMessage::StreamChunk(callback_id, chunk) => {
+                // Execute stream read callback with chunk result
+                let callback_opt = {
+                    let mut cbs = self.callbacks.lock().unwrap();
+                    cbs.remove(&callback_id)
+                };
 
-                    if let Some(callback) = callback_opt {
-                        log::debug!("Executing stream chunk callback {}", callback_id);
+                if let Some(callback) = callback_opt {
+                    log::debug!("Executing stream chunk callback {}", callback_id);
 
-                        // Create result object based on chunk type
-                        let result_script = match chunk {
-                            stream_manager::StreamChunk::Data(bytes) => {
-                                // Convert bytes to Uint8Array
-                                let bytes_array: Vec<u8> = bytes.to_vec();
-                                let bytes_str = format!("{:?}", bytes_array);
-                                format!(
-                                    r#"({{
+                    // Create result object based on chunk type
+                    let result_script = match chunk {
+                        stream_manager::StreamChunk::Data(bytes) => {
+                            // Convert bytes to Uint8Array
+                            let bytes_array: Vec<u8> = bytes.to_vec();
+                            let bytes_str = format!("{:?}", bytes_array);
+                            format!(
+                                r#"({{
                                         done: false,
                                         value: new Uint8Array({})
                                     }})"#,
-                                    bytes_str
-                                )
-                            }
-                            stream_manager::StreamChunk::Done => {
-                                r#"({ done: true, value: undefined })"#.to_string()
-                            }
-                            stream_manager::StreamChunk::Error(err) => {
-                                format!(r#"({{ error: "{}" }})"#, err.replace('"', "\\\""))
-                            }
-                        };
+                                bytes_str
+                            )
+                        }
+                        stream_manager::StreamChunk::Done => {
+                            r#"({ done: true, value: undefined })"#.to_string()
+                        }
+                        stream_manager::StreamChunk::Error(err) => {
+                            format!(r#"({{ error: "{}" }})"#, err.replace('"', "\\\""))
+                        }
+                    };
 
-                        match self.context.evaluate_script(&result_script, 1) {
-                            Ok(result_obj) => {
-                                match callback.call_as_function(&self.context, None, &[result_obj])
-                                {
-                                    Ok(_) => log::debug!("Stream chunk callback executed"),
-                                    Err(e) => {
-                                        if let Ok(err_str) = e.to_js_string(&self.context) {
-                                            log::error!(
-                                                "Stream chunk callback failed: {}",
-                                                err_str
-                                            );
-                                        }
+                    match self.context.evaluate_script(&result_script, 1) {
+                        Ok(result_obj) => {
+                            match callback.call_as_function(&self.context, None, &[result_obj]) {
+                                Ok(_) => log::debug!("Stream chunk callback executed"),
+                                Err(e) => {
+                                    if let Ok(err_str) = e.to_js_string(&self.context) {
+                                        log::error!("Stream chunk callback failed: {}", err_str);
                                     }
                                 }
                             }
-                            Err(e) => {
-                                if let Ok(err_str) = e.to_js_string(&self.context) {
-                                    log::error!("Failed to create stream result: {}", err_str);
-                                }
+                        }
+                        Err(e) => {
+                            if let Ok(err_str) = e.to_js_string(&self.context) {
+                                log::error!("Failed to create stream result: {}", err_str);
                             }
                         }
                     }

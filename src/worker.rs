@@ -11,6 +11,7 @@ pub struct Worker {
     pub(crate) runtime: Runtime,
     event_loop_handle: tokio::task::JoinHandle<()>,
     aborted: Arc<AtomicBool>,
+    limits: RuntimeLimits,
 }
 
 impl Worker {
@@ -37,21 +38,19 @@ impl Worker {
     /// All operations (fetch, log, etc.) go through the runner's OperationsHandler.
     pub async fn new_with_ops(
         script: Script,
-        _limits: Option<RuntimeLimits>,
+        limits: Option<RuntimeLimits>,
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
 
         // Setup addEventListener binding
-        setup_event_listener(&mut runtime.context, runtime.fetch_response_tx.clone());
+        setup_event_listener(&mut runtime.context, runtime.completion_tx.clone());
 
         // Setup environment variables
         setup_env(&mut runtime.context, &script.env);
 
         // Setup console
         crate::runtime::bindings::setup_console(&mut runtime.context);
-
-        // TODO: Apply runtime limits
 
         // Extract JavaScript code from WorkerCode
         let js_code = script.code.as_js().ok_or_else(|| {
@@ -76,6 +75,7 @@ impl Worker {
             runtime,
             event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
+            limits: limits.unwrap_or_default(),
         })
     }
 
@@ -186,8 +186,9 @@ impl Worker {
                 TerminationReason::Exception("Failed to create Request object".to_string())
             })?;
 
-        // Call the fetch event trigger (set by addEventListener)
-        // The Response is stored in __lastResponse by the event handler
+        // The handler reports the response metadata via the native __completeEvent
+        let done_rx = self.install_completion_channel();
+
         let trigger_script = r#"
             (function(request) {
                 if (typeof globalThis.__triggerFetch === 'function') {
@@ -232,91 +233,7 @@ impl Worker {
             return Err(TerminationReason::Exception(error_msg));
         }
 
-        // Wait for __lastResponse to be set with adaptive polling
-        // Fast polling for sync responses, timeout after ~5s for async handlers
-        for iteration in 0..500 {
-            self.runtime.process_callbacks();
-
-            // Check if __lastResponse is set
-            let check_script = r#"
-                (function() {
-                    const resp = globalThis.__lastResponse;
-                    if (resp && typeof resp === 'object' && resp.status !== undefined) {
-                        return true;
-                    }
-                    return false;
-                })()
-            "#;
-
-            if let Ok(result) = self.runtime.context.evaluate_script(check_script, 1) {
-                if result.to_bool(&self.runtime.context) {
-                    break;
-                }
-            }
-
-            // Adaptive sleep: fast for first checks, slower later
-            let sleep_duration = if iteration < 10 {
-                tokio::time::Duration::from_micros(1)
-            } else if iteration < 110 {
-                tokio::time::Duration::from_millis(1)
-            } else {
-                tokio::time::Duration::from_millis(10)
-            };
-
-            tokio::time::sleep(sleep_duration).await;
-
-            if iteration == 499 {
-                return Err(TerminationReason::WallClockTimeout);
-            }
-        }
-
-        // Extract response metadata from __lastResponse
-        // All responses with body are now streamed via _responseStreamId
-        let extract_script = r#"
-            (function() {
-                const resp = globalThis.__lastResponse;
-                if (!resp) {
-                    return JSON.stringify({ error: 'No response' });
-                }
-
-                // Extract headers
-                const headers = [];
-                if (resp.headers) {
-                    if (resp.headers instanceof Headers) {
-                        for (const [key, value] of resp.headers) {
-                            headers.push([key, String(value)]);
-                        }
-                    } else if (typeof resp.headers === 'object') {
-                        for (const [key, value] of Object.entries(resp.headers)) {
-                            headers.push([key, String(value)]);
-                        }
-                    }
-                }
-
-                // Check for response stream ID (all responses with body have this now)
-                const responseStreamId = resp._responseStreamId;
-
-                return JSON.stringify({
-                    status: resp.status || 200,
-                    headers: headers,
-                    responseStreamId: responseStreamId !== undefined ? responseStreamId : null,
-                    hasBody: resp.body !== null
-                });
-            })()
-        "#;
-
-        let extract_result = self
-            .runtime
-            .context
-            .evaluate_script(extract_script, 1)
-            .map_err(|_| {
-                TerminationReason::Exception("Failed to extract response data".to_string())
-            })?;
-
-        let json_str = extract_result
-            .to_js_string(&self.runtime.context)
-            .map_err(|_| TerminationReason::Exception("Failed to get response JSON".to_string()))?
-            .to_string();
+        let json_str = self.wait_for_completion(done_rx).await?;
 
         // Parse the extracted metadata
         #[derive(serde::Deserialize)]
@@ -427,6 +344,9 @@ impl Worker {
             .evaluate_script(&event_script, 1)
             .map_err(|_| TerminationReason::Exception("Failed to create event".to_string()))?;
 
+        // The handler reports the task result via the native __completeEvent
+        let done_rx = self.install_completion_channel();
+
         // Try __taskHandler first, then fallback to __triggerScheduled for backward compat
         let trigger_script = r#"
             (function(event) {
@@ -468,86 +388,77 @@ impl Worker {
             return Err(TerminationReason::Exception(error_msg));
         }
 
-        // Process callbacks with adaptive polling and check for __taskResult
-        for iteration in 0..500 {
-            self.runtime.process_callbacks();
+        let json_str = self.wait_for_completion(done_rx).await?;
 
-            // Check if __requestComplete is set (handler finished including waitUntil)
-            let check_script = r#"
-                (function() {
-                    return globalThis.__requestComplete === true;
-                })()
-            "#;
-
-            if let Ok(result) = self.runtime.context.evaluate_script(check_script, 1) {
-                if result.to_bool(&self.runtime.context) {
-                    break;
-                }
-            }
-
-            // Adaptive sleep
-            let sleep_duration = if iteration < 10 {
-                tokio::time::Duration::from_micros(1)
-            } else if iteration < 110 {
-                tokio::time::Duration::from_millis(1)
-            } else {
-                tokio::time::Duration::from_millis(10)
-            };
-
-            tokio::time::sleep(sleep_duration).await;
-
-            if iteration == 499 {
-                return Err(TerminationReason::WallClockTimeout);
-            }
+        #[derive(serde::Deserialize)]
+        struct ExtractedResult {
+            success: bool,
+            data: Option<serde_json::Value>,
+            error: Option<String>,
         }
 
-        // Extract __taskResult from JS
-        let extract_script = r#"
-            (function() {
-                const result = globalThis.__taskResult;
-                if (!result || typeof result !== 'object') {
-                    return JSON.stringify({ success: true });
-                }
-                return JSON.stringify({
-                    success: result.success !== false,
-                    data: result.data,
-                    error: result.error
-                });
-            })()
-        "#;
+        let task_result = match serde_json::from_str::<ExtractedResult>(&json_str) {
+            Ok(extracted) => TaskResult {
+                success: extracted.success,
+                data: extracted.data,
+                error: extracted.error,
+            },
+            Err(_) => TaskResult::success(),
+        };
 
-        let task_result =
-            if let Ok(result_val) = self.runtime.context.evaluate_script(extract_script, 1) {
-                if let Ok(result_str) = result_val.to_js_string(&self.runtime.context) {
-                    let json_str = result_str.to_string();
-
-                    #[derive(serde::Deserialize)]
-                    struct ExtractedResult {
-                        success: bool,
-                        data: Option<serde_json::Value>,
-                        error: Option<String>,
-                    }
-
-                    if let Ok(extracted) = serde_json::from_str::<ExtractedResult>(&json_str) {
-                        TaskResult {
-                            success: extracted.success,
-                            data: extracted.data,
-                            error: extracted.error,
-                        }
-                    } else {
-                        TaskResult::success()
-                    }
-                } else {
-                    TaskResult::success()
-                }
-            } else {
-                TaskResult::success()
-            };
-
-        // Send result
         let _ = task_init.res_tx.send(task_result);
 
         Ok(())
+    }
+
+    /// Arm the completion channel for the next event execution
+    fn install_completion_channel(&mut self) -> tokio::sync::oneshot::Receiver<String> {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        *self.runtime.completion_tx.lock().unwrap() = Some(tx);
+
+        rx
+    }
+
+    /// Drive JS callbacks until the event completes, honoring the wall-clock limit
+    async fn wait_for_completion(
+        &mut self,
+        mut done_rx: tokio::sync::oneshot::Receiver<String>,
+    ) -> Result<String, TerminationReason> {
+        let deadline = match self.limits.max_wall_clock_time_ms {
+            0 => None,
+            ms => Some(tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms)),
+        };
+
+        loop {
+            let timeout = async {
+                match deadline {
+                    Some(at) => tokio::time::sleep_until(at).await,
+                    None => std::future::pending().await,
+                }
+            };
+
+            tokio::select! {
+                result = &mut done_rx => {
+                    return result.map_err(|_| {
+                        TerminationReason::Other("Completion channel closed".to_string())
+                    });
+                }
+                msg = self.runtime.callback_rx.recv() => {
+                    match msg {
+                        Some(msg) => self.runtime.handle_callback(msg),
+                        None => {
+                            return Err(TerminationReason::Other(
+                                "Event loop stopped".to_string(),
+                            ));
+                        }
+                    }
+                }
+                _ = timeout => {
+                    return Err(TerminationReason::WallClockTimeout);
+                }
+            }
+        }
     }
 }
 
@@ -561,13 +472,11 @@ impl Drop for Worker {
 /// Setup addEventListener binding
 fn setup_event_listener(
     context: &mut rusty_jsc::JSContext,
-    fetch_response_tx: std::sync::Arc<
-        std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>,
-    >,
+    completion_tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
 ) {
-    // Setup native __sendFetchResponse function
-    let fetch_tx_clone = fetch_response_tx.clone();
-    let send_response_callback = rusty_jsc::callback_closure!(
+    // Setup native __completeEvent function
+    let completion_tx_clone = completion_tx.clone();
+    let complete_event_callback = rusty_jsc::callback_closure!(
         context,
         move |ctx: rusty_jsc::JSContext,
               _function: rusty_jsc::JSObject,
@@ -577,12 +486,12 @@ fn setup_event_listener(
                 return Ok(rusty_jsc::JSValue::undefined(&ctx));
             }
 
-            if let Ok(response_json) = args[0].to_js_string(&ctx) {
-                let response_str = response_json.to_string();
+            if let Ok(result_json) = args[0].to_js_string(&ctx) {
+                let result_str = result_json.to_string();
 
-                // Send the response through the channel
-                if let Some(tx) = fetch_tx_clone.lock().unwrap().take() {
-                    let _ = tx.send(response_str);
+                // Send the event result through the channel
+                if let Some(tx) = completion_tx_clone.lock().unwrap().take() {
+                    let _ = tx.send(result_str);
                 }
             }
 
@@ -592,11 +501,7 @@ fn setup_event_listener(
 
     context
         .get_global_object()
-        .set_property(
-            context,
-            "__sendFetchResponse",
-            send_response_callback.into(),
-        )
+        .set_property(context, "__completeEvent", complete_event_callback.into())
         .unwrap();
 
     let add_event_listener_script = r#"
@@ -640,35 +545,51 @@ fn setup_event_listener(
             return response;
         };
 
+        // Extract the metadata sent back to Rust once a response is ready
+        globalThis.__extractResponseMeta = function(resp) {
+            const headers = [];
+            if (resp.headers) {
+                if (resp.headers instanceof Headers) {
+                    for (const [key, value] of resp.headers) {
+                        headers.push([key, String(value)]);
+                    }
+                } else if (typeof resp.headers === 'object') {
+                    for (const [key, value] of Object.entries(resp.headers)) {
+                        headers.push([key, String(value)]);
+                    }
+                }
+            }
+
+            const responseStreamId = resp._responseStreamId;
+
+            return {
+                status: resp.status || 200,
+                headers: headers,
+                responseStreamId: responseStreamId !== undefined ? responseStreamId : null,
+                hasBody: resp.body !== null
+            };
+        };
+
+        // Stream the response body, then complete the fetch event
+        globalThis.__finishFetch = function(response) {
+            return __streamResponseBody(response).then(resp => {
+                __completeEvent(JSON.stringify(__extractResponseMeta(resp)));
+            });
+        };
+
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
                 globalThis.__fetchHandler = handler;
                 globalThis.__triggerFetch = function(request) {
-                    // Reset last response
-                    globalThis.__lastResponse = null;
-
                     const event = {
                         request: request,
                         respondWith: function(responseOrPromise) {
-                            // Handle both direct Response and Promise<Response>
-                            if (responseOrPromise && typeof responseOrPromise.then === 'function') {
-                                // It's a Promise, wait for it to resolve then stream
-                                responseOrPromise
-                                    .then(response => __streamResponseBody(response))
-                                    .then(response => {
-                                        globalThis.__lastResponse = response;
-                                    })
-                                    .catch(error => {
-                                        console.error('[respondWith] Promise rejected:', error);
-                                        globalThis.__lastResponse = new Response(null, { status: 500 });
-                                    });
-                            } else {
-                                // Direct Response object - stream it
-                                __streamResponseBody(responseOrPromise)
-                                    .then(response => {
-                                        globalThis.__lastResponse = response;
-                                    });
-                            }
+                            Promise.resolve(responseOrPromise)
+                                .then(response => __finishFetch(response))
+                                .catch(error => {
+                                    console.error('[respondWith] Promise rejected:', error);
+                                    __finishFetch(new Response(null, { status: 500 }));
+                                });
                         }
                     };
 
@@ -677,12 +598,11 @@ fn setup_event_listener(
                         handler(event);
                     } catch (error) {
                         console.error('[addEventListener] Error in fetch handler:', error);
-                        globalThis.__lastResponse = new Response(null, { status: 500 });
+                        __finishFetch(new Response(null, { status: 500 }));
                     }
                 };
             } else if (type === 'scheduled') {
                 globalThis.__triggerScheduled = async function(event) {
-                    globalThis.__requestComplete = false;
                     const promises = [];
 
                     event.waitUntil = function(promise) {
@@ -698,12 +618,11 @@ fn setup_event_listener(
                             await Promise.all(promises);
                         }
                     } finally {
-                        globalThis.__requestComplete = true;
+                        __completeEvent(JSON.stringify({ success: true }));
                     }
                 };
             } else if (type === 'task') {
                 globalThis.__taskHandler = async function(event) {
-                    globalThis.__requestComplete = false;
                     const waitUntilPromises = [];
 
                     // Default result (success with no data)
@@ -751,7 +670,7 @@ fn setup_event_listener(
                             error: error.message || String(error)
                         };
                     } finally {
-                        globalThis.__requestComplete = true;
+                        __completeEvent(JSON.stringify(globalThis.__taskResult));
                     }
                 };
             }
