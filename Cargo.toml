@@ -39,3 +39,6 @@ url = "2.5"
 ring = "0.17"
 uuid = { version = "1.0", features = ["v4"] }
 
+[dev-dependencies]
+# ESM to classic script lowering for the SSR benchmark fixture
+openworkers-transform = { git = "https://github.com/openworkers/openworkers-transform" }
