@@ -1,8 +1,21 @@
 use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
-use std::sync::{Arc, Mutex};
+use std::cell::Cell;
+use std::rc::Rc;
+use std::sync::Arc;
 use tokio::sync::mpsc;
+
+/// Ids are handed out from the JS thread only, so no lock is needed
+pub(crate) type CallbackCounter = Rc<Cell<CallbackId>>;
+
+fn next_callback_id(counter: &CallbackCounter) -> CallbackId {
+    let id = counter.get();
+
+    counter.set(id + 1);
+
+    id
+}
 
 /// JSC collects whatever JS cannot reach, so pending callbacks live in a JS map
 /// rather than in a Rust one the collector never sees
@@ -194,7 +207,7 @@ pub fn setup_microtask(context: &mut JSContext) {
 pub fn setup_fetch(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    next_id: Arc<Mutex<CallbackId>>,
+    next_id: CallbackCounter,
 ) {
     let scheduler_tx_clone = scheduler_tx;
     let next_id_clone = next_id;
@@ -246,13 +259,7 @@ pub fn setup_fetch(
                 .and_then(|v| v.to_object(&ctx).ok())
                 .ok_or_else(|| JSValue::string(&ctx, "Failed to get resolve callback"))?;
 
-            // Generate callback ID for resolve
-            let callback_id = {
-                let mut next = next_id_clone.lock().unwrap();
-                let id = *next;
-                *next += 1;
-                id
-            };
+            let callback_id = next_callback_id(&next_id_clone);
 
             // Store resolve callback (we'll call it with Response or Error)
             store_callback(&ctx, callback_id, resolve_callback)?;
@@ -334,7 +341,7 @@ pub fn setup_fetch(
 pub fn setup_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    next_id: Arc<Mutex<CallbackId>>,
+    next_id: CallbackCounter,
 ) {
     // Setup setTimeout
     setup_set_timeout(context, scheduler_tx.clone(), next_id.clone());
@@ -350,7 +357,7 @@ pub fn setup_timer(
 fn setup_set_timeout(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    next_id: Arc<Mutex<CallbackId>>,
+    next_id: CallbackCounter,
 ) {
     let next_id_clone = next_id;
     let scheduler_tx_clone = scheduler_tx;
@@ -375,13 +382,7 @@ fn setup_set_timeout(
                 Err(_) => return Err(JSValue::string(&ctx, "Second argument must be a number")),
             };
 
-            // Generate callback ID
-            let callback_id = {
-                let mut next = next_id_clone.lock().unwrap();
-                let id = *next;
-                *next += 1;
-                id
-            };
+            let callback_id = next_callback_id(&next_id_clone);
 
             store_callback(&ctx, callback_id, callback)?;
 
@@ -410,7 +411,7 @@ fn setup_set_timeout(
 fn setup_set_interval(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    next_id: Arc<Mutex<CallbackId>>,
+    next_id: CallbackCounter,
 ) {
     let next_id_clone = next_id;
     let scheduler_tx_clone = scheduler_tx;
@@ -435,13 +436,7 @@ fn setup_set_interval(
                 Err(_) => return Err(JSValue::string(&ctx, "Second argument must be a number")),
             };
 
-            // Generate callback ID
-            let callback_id = {
-                let mut next = next_id_clone.lock().unwrap();
-                let id = *next;
-                *next += 1;
-                id
-            };
+            let callback_id = next_callback_id(&next_id_clone);
 
             store_callback(&ctx, callback_id, callback)?;
 
@@ -541,7 +536,7 @@ fn setup_clear_timer(
 pub fn setup_stream_ops(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    next_id: Arc<Mutex<CallbackId>>,
+    next_id: CallbackCounter,
 ) {
     // Create __nativeStreamRead(stream_id, resolve_callback)
     // This is called from JS to request the next chunk from a stream
@@ -570,13 +565,7 @@ pub fn setup_stream_ops(
                 Err(_) => return Err(JSValue::string(&ctx, "callback must be a function")),
             };
 
-            // Generate callback ID
-            let callback_id = {
-                let mut next = next_id_clone.lock().unwrap();
-                let id = *next;
-                *next += 1;
-                id
-            };
+            let callback_id = next_callback_id(&next_id_clone);
 
             store_callback(&ctx, callback_id, callback)?;
 

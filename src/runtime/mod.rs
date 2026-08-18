@@ -15,7 +15,8 @@ pub use fetch::parse_fetch_options;
 
 use openworkers_core::{HttpRequest, HttpResponseMeta};
 use rusty_jsc::{JSContext, JSValue};
-use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::sync::Arc;
 use std::time::Duration;
 use tokio::sync::mpsc;
 
@@ -154,7 +155,7 @@ impl Runtime {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
-        let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
+        let next_callback_id: bindings::CallbackCounter = Rc::new(std::cell::Cell::new(1));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         let mut context = JSContext::default();
