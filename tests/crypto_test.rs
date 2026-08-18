@@ -522,3 +522,41 @@ async fn test_digest_of_a_view_matches_the_same_bytes() {
     let body = response.body.collect().await.expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
+
+/// getRandomValues fills the view itself, and leaves the rest of its buffer alone
+#[tokio::test]
+async fn test_get_random_values_fills_a_view_at_its_offset() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const buffer = new ArrayBuffer(16);
+            const view = new Uint8Array(buffer, 8, 8);
+
+            crypto.getRandomValues(view);
+
+            const head = new Uint8Array(buffer, 0, 8);
+            const untouched = head.every(byte => byte === 0);
+            const filled = view.some(byte => byte !== 0);
+
+            event.respondWith(new Response(untouched && filled ? 'OK' : 'FAIL'));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
+}

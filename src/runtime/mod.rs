@@ -78,6 +78,24 @@ pub(crate) fn typed_array_bytes(context: &JSContext, value: &JSValue) -> Option<
     Some(bytes::Bytes::copy_from_slice(bytes))
 }
 
+/// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`
+pub(crate) fn new_uint8_array(context: &mut JSContext, bytes: &[u8]) -> Result<JSValue, JSValue> {
+    let script = format!("new Uint8Array({})", bytes.len());
+    let array = context.evaluate_script(&script, 1)?;
+
+    if bytes.is_empty() {
+        return Ok(array);
+    }
+
+    let array_obj = array.to_object(context)?;
+
+    // SAFETY: the pointer stays valid as long as no JSC call runs, and none does here
+    let buffer = unsafe { array_obj.get_typed_array_buffer(context)? };
+    buffer.copy_from_slice(bytes);
+
+    Ok(array)
+}
+
 /// Message sent from JS to schedule async operations
 pub enum SchedulerMessage {
     /// Schedule a timeout: (callback_id, delay_ms)
@@ -260,24 +278,6 @@ impl Runtime {
         self.context.evaluate_script(script, 1)
     }
 
-    /// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`
-    pub(crate) fn new_uint8_array(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
-        let script = format!("new Uint8Array({})", bytes.len());
-        let array = self.context.evaluate_script(&script, 1)?;
-
-        if bytes.is_empty() {
-            return Ok(array);
-        }
-
-        let array_obj = array.to_object(&self.context)?;
-
-        // SAFETY: the pointer stays valid as long as no JSC call runs, and none does here
-        let buffer = unsafe { array_obj.get_typed_array_buffer(&self.context)? };
-        buffer.copy_from_slice(bytes);
-
-        Ok(array)
-    }
-
     fn make_response(
         &mut self,
         meta: &HttpResponseMeta,
@@ -325,7 +325,7 @@ impl Runtime {
             .evaluate_script("(value => ({ done: false, value }))", 1)?
             .to_object(&self.context)?;
 
-        let value = self.new_uint8_array(&bytes)?;
+        let value = new_uint8_array(&mut self.context, &bytes)?;
 
         wrap.call_as_function(&self.context, None, &[value])
     }

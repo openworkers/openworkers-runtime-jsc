@@ -450,7 +450,7 @@ impl Worker {
             RequestBody::Stream(_) | RequestBody::None => &[],
         };
 
-        let body = self.runtime.new_uint8_array(body)?;
+        let body = crate::runtime::new_uint8_array(&mut self.runtime.context, body)?;
 
         build_request.call_as_function(&self.runtime.context, None, &[method, url, headers, body])
     }

@@ -1,41 +1,36 @@
 use ring::{digest, hmac, rand, rsa, signature, signature::KeyPair};
 use rusty_jsc::JSContext;
+use rusty_jsc::JSValue;
+
+/// Web Crypto hands its results back as an ArrayBuffer
+fn array_buffer(context: &mut JSContext, bytes: &[u8]) -> Result<JSValue, JSValue> {
+    let array = super::new_uint8_array(context, bytes)?;
+
+    array
+        .to_object(context)?
+        .get_property(context, "buffer")
+        .ok_or_else(|| JSValue::string(context, "Uint8Array has no buffer"))
+}
 
 /// Setup crypto global object with getRandomValues, randomUUID, and subtle
 pub fn setup_crypto(context: &mut JSContext) {
-    // Create __nativeGetRandomValues function
-    let get_random_values_fn = rusty_jsc::callback_closure!(
+    // Create __nativeRandomBytes(length) -> Uint8Array
+    let random_bytes_fn = rusty_jsc::callback_closure!(
         context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Err(JSValue::string(
-                    &ctx,
-                    "getRandomValues requires an argument",
-                ));
-            }
-
-            let array = match args[0].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Argument must be a TypedArray")),
+        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            let length = match args.first().map(|arg| arg.to_number(&ctx)) {
+                Some(Ok(length)) if length >= 0.0 => length as usize,
+                _ => return Err(JSValue::string(&ctx, "randomBytes requires a length")),
             };
 
-            // Get the typed array buffer and fill with random bytes
-            let bytes = unsafe {
-                match array.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice,
-                    Err(_) => return Err(JSValue::string(&ctx, "Argument must be a TypedArray")),
-                }
-            };
-
-            // Fill with random bytes using ring
+            let mut bytes = vec![0u8; length];
             let rng = rand::SystemRandom::new();
 
-            if rand::SecureRandom::fill(&rng, bytes).is_err() {
+            if rand::SecureRandom::fill(&rng, &mut bytes).is_err() {
                 return Err(JSValue::string(&ctx, "Failed to generate random bytes"));
             }
 
-            // Return the same array
-            Ok(args[0].clone())
+            super::new_uint8_array(&mut ctx, &bytes)
         }
     );
 
@@ -77,19 +72,7 @@ pub fn setup_crypto(context: &mut JSContext) {
                 _ => return Err(JSValue::string(&ctx, "Unsupported algorithm")),
             };
 
-            // Compute digest
-            let result = digest::digest(algorithm, &data);
-            let result_bytes = result.as_ref();
-
-            // Create Uint8Array with result by converting to JSON array and back
-            let json_array: Vec<u8> = result_bytes.to_vec();
-            let json_str = serde_json::to_string(&json_array).unwrap();
-            let script = format!("new Uint8Array({}).buffer", json_str);
-
-            match ctx.evaluate_script(&script, 1) {
-                Ok(buffer) => Ok(buffer),
-                Err(_) => Err(JSValue::string(&ctx, "Failed to create ArrayBuffer")),
-            }
+            array_buffer(&mut ctx, digest::digest(algorithm, &data).as_ref())
         }
     );
 
@@ -134,17 +117,8 @@ pub fn setup_crypto(context: &mut JSContext) {
             // Sign
             let key = hmac::Key::new(algorithm, &key_data);
             let tag = hmac::sign(&key, &data);
-            let result_bytes = tag.as_ref();
 
-            // Create Uint8Array with result
-            let json_array: Vec<u8> = result_bytes.to_vec();
-            let json_str = serde_json::to_string(&json_array).unwrap();
-            let script = format!("new Uint8Array({}).buffer", json_str);
-
-            match ctx.evaluate_script(&script, 1) {
-                Ok(buffer) => Ok(buffer),
-                Err(_) => Err(JSValue::string(&ctx, "Failed to create ArrayBuffer")),
-            }
+            array_buffer(&mut ctx, tag.as_ref())
         }
     );
 
@@ -225,21 +199,15 @@ pub fn setup_crypto(context: &mut JSContext) {
                 Err(_) => return Err(JSValue::string(&ctx, "Failed to parse key pair")),
             };
 
-            let public_key_bytes = key_pair.public_key().as_ref();
+            let private_key = array_buffer(&mut ctx, pkcs8_bytes.as_ref())?;
+            let public_key = array_buffer(&mut ctx, key_pair.public_key().as_ref())?;
 
-            // Create result object with privateKey and publicKey as JSON arrays
-            let private_json = serde_json::to_string(&pkcs8_bytes.as_ref().to_vec()).unwrap();
-            let public_json = serde_json::to_string(&public_key_bytes.to_vec()).unwrap();
+            let mut pair = JSObject::<rusty_jsc::JSObjectGeneric>::new(&ctx);
 
-            let script = format!(
-                "({{ privateKey: new Uint8Array({}).buffer, publicKey: new Uint8Array({}).buffer }})",
-                private_json, public_json
-            );
+            pair.set_property(&ctx, "privateKey", private_key)?;
+            pair.set_property(&ctx, "publicKey", public_key)?;
 
-            match ctx.evaluate_script(&script, 1) {
-                Ok(result) => Ok(result),
-                Err(_) => Err(JSValue::string(&ctx, "Failed to create key pair object")),
-            }
+            Ok(pair.into())
         }
     );
 
@@ -284,13 +252,7 @@ pub fn setup_crypto(context: &mut JSContext) {
                 Err(_) => return Err(JSValue::string(&ctx, "Signing failed")),
             };
 
-            let json_array = serde_json::to_string(&sig.as_ref().to_vec()).unwrap();
-            let script = format!("new Uint8Array({}).buffer", json_array);
-
-            match ctx.evaluate_script(&script, 1) {
-                Ok(buffer) => Ok(buffer),
-                Err(_) => Err(JSValue::string(&ctx, "Failed to create signature buffer")),
-            }
+            array_buffer(&mut ctx, sig.as_ref())
         }
     );
 
@@ -374,15 +336,7 @@ pub fn setup_crypto(context: &mut JSContext) {
             let mut sig = vec![0u8; key_pair.public().modulus_len()];
 
             match key_pair.sign(padding, &rng, &data, &mut sig) {
-                Ok(_) => {
-                    let json_array = serde_json::to_string(&sig).unwrap();
-                    let script = format!("new Uint8Array({}).buffer", json_array);
-
-                    match ctx.evaluate_script(&script, 1) {
-                        Ok(buffer) => Ok(buffer),
-                        Err(_) => Err(JSValue::string(&ctx, "Failed to create signature buffer")),
-                    }
-                }
+                Ok(_) => array_buffer(&mut ctx, &sig),
                 Err(_) => Err(JSValue::string(&ctx, "RSA signing failed")),
             }
         }
@@ -434,11 +388,7 @@ pub fn setup_crypto(context: &mut JSContext) {
     // Add native functions to global
     let mut global = context.get_global_object();
     global
-        .set_property(
-            context,
-            "__nativeGetRandomValues",
-            get_random_values_fn.into(),
-        )
+        .set_property(context, "__nativeRandomBytes", random_bytes_fn.into())
         .unwrap();
     global
         .set_property(context, "__nativeRandomUUID", random_uuid_fn.into())
@@ -477,7 +427,16 @@ pub fn setup_crypto(context: &mut JSContext) {
         // Create crypto object
         globalThis.crypto = {
             getRandomValues: function(typedArray) {
-                return __nativeGetRandomValues(typedArray);
+                const bytes = __nativeRandomBytes(typedArray.byteLength);
+                const view = new Uint8Array(
+                    typedArray.buffer,
+                    typedArray.byteOffset,
+                    typedArray.byteLength
+                );
+
+                view.set(bytes);
+
+                return typedArray;
             },
             randomUUID: function() {
                 return __nativeRandomUUID();
