@@ -63,16 +63,9 @@ pub fn setup_crypto(context: &mut JSContext) {
             };
 
             // Get data as Uint8Array
-            let data_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
             };
 
             // Select algorithm
@@ -118,29 +111,15 @@ pub fn setup_crypto(context: &mut JSContext) {
             };
 
             // Get key data
-            let key_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Key must be a Uint8Array")),
-            };
-
-            let key_data = unsafe {
-                match key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Err(JSValue::string(&ctx, "Key must be a Uint8Array")),
-                }
+            let key_data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "Key must be a Uint8Array")),
             };
 
             // Get data
-            let data_obj = match args[2].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[2]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
             };
 
             // Select algorithm
@@ -187,42 +166,21 @@ pub fn setup_crypto(context: &mut JSContext) {
             };
 
             // Get key data
-            let key_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let key_data = unsafe {
-                match key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let key_data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
             // Get signature
-            let sig_obj = match args[2].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let signature = unsafe {
-                match sig_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let signature = match super::typed_array_bytes(&ctx, &args[2]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
             // Get data
-            let data_obj = match args[3].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[3]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
             // Select algorithm
@@ -296,30 +254,16 @@ pub fn setup_crypto(context: &mut JSContext) {
                 ));
             }
 
-            let key_obj = match args[0].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Private key must be a Uint8Array")),
-            };
-
-            let private_key_data = unsafe {
-                match key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => {
-                        return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
-                    }
+            let private_key_data = match super::typed_array_bytes(&ctx, &args[0]) {
+                Some(bytes) => bytes,
+                None => {
+                    return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
                 }
             };
 
-            let data_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
             };
 
             let rng = rand::SystemRandom::new();
@@ -358,40 +302,19 @@ pub fn setup_crypto(context: &mut JSContext) {
                 return Ok(JSValue::boolean(&ctx, false));
             }
 
-            let public_key_obj = match args[0].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
+            let public_key_data = match super::typed_array_bytes(&ctx, &args[0]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
-            let public_key_data = unsafe {
-                match public_key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let sig_data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
-            let sig_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let sig_data = unsafe {
-                match sig_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
-            };
-
-            let data_obj = match args[2].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[2]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
             // Verify using UnparsedPublicKey
@@ -421,30 +344,16 @@ pub fn setup_crypto(context: &mut JSContext) {
                 Err(_) => return Err(JSValue::string(&ctx, "Hash algorithm must be a string")),
             };
 
-            let key_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Private key must be a Uint8Array")),
-            };
-
-            let private_key_data = unsafe {
-                match key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => {
-                        return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
-                    }
+            let private_key_data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => {
+                    return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
                 }
             };
 
-            let data_obj = match args[2].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[2]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
             };
 
             // Select padding/encoding based on hash algorithm
@@ -492,40 +401,19 @@ pub fn setup_crypto(context: &mut JSContext) {
                 Err(_) => return Ok(JSValue::boolean(&ctx, false)),
             };
 
-            let public_key_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
+            let public_key_data = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
-            let public_key_data = unsafe {
-                match public_key_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let sig_data = match super::typed_array_bytes(&ctx, &args[2]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
-            let sig_obj = match args[2].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let sig_data = unsafe {
-                match sig_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
-            };
-
-            let data_obj = match args[3].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let data = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => slice.to_vec(),
-                    Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-                }
+            let data = match super::typed_array_bytes(&ctx, &args[3]) {
+                Some(bytes) => bytes,
+                None => return Ok(JSValue::boolean(&ctx, false)),
             };
 
             // Select verification algorithm based on hash

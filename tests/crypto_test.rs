@@ -484,3 +484,41 @@ async fn test_hmac_different_algorithms() {
     let body = response.body.collect().await.expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
+
+/// A view is hashed from its own offset, not from the start of its buffer
+#[tokio::test]
+async fn test_digest_of_a_view_matches_the_same_bytes() {
+    let script = r#"
+        addEventListener('fetch', async (event) => {
+            const hex = (buffer) => Array.from(new Uint8Array(buffer))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+
+            const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+
+            const view = await crypto.subtle.digest('SHA-256', new Uint8Array(buffer, 4, 3));
+            const copy = await crypto.subtle.digest('SHA-256', new Uint8Array([5, 6, 7]));
+
+            event.respondWith(new Response(hex(view) === hex(copy) ? 'OK' : 'FAIL'));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
+}

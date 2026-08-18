@@ -124,3 +124,41 @@ async fn test_readable_stream_with_then() {
     let body = response.body.collect().await.expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
+
+/// A chunk may be a view into a larger buffer, and it starts at its own offset
+#[tokio::test]
+async fn test_response_stream_writes_a_view_from_its_offset() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+            const stream = new ReadableStream({
+                start(controller) {
+                    controller.enqueue(new Uint8Array(buffer, 4, 3));
+                    controller.close();
+                }
+            });
+
+            event.respondWith(new Response(stream));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+
+    assert_eq!(body.to_vec(), vec![5, 6, 7]);
+}

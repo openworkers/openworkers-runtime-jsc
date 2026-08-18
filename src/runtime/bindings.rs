@@ -701,18 +701,10 @@ pub fn setup_response_stream_ops(
                 Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
             };
 
-            // Get the Uint8Array data
-            let data_obj = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "data must be a Uint8Array")),
-            };
-
             // Read bytes from the TypedArray
-            let bytes = unsafe {
-                match data_obj.get_typed_array_buffer(&ctx) {
-                    Ok(slice) => bytes::Bytes::copy_from_slice(slice),
-                    Err(_) => return Err(JSValue::string(&ctx, "Failed to read TypedArray")),
-                }
+            let bytes = match super::typed_array_bytes(&ctx, &args[1]) {
+                Some(bytes) => bytes,
+                None => return Err(JSValue::string(&ctx, "data must be a Uint8Array")),
             };
 
             // Try to write the chunk (non-blocking)
