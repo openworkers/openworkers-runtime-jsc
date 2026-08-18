@@ -30,6 +30,54 @@ pub(crate) fn error_text(context: &JSContext, error: &JSValue) -> String {
     }
 }
 
+/// Copy out the bytes of an ArrayBuffer or of any typed array view,
+/// or None for a value that holds no buffer
+pub(crate) fn typed_array_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes> {
+    use rusty_jsc::private;
+
+    let mut exception: private::JSValueRef = std::ptr::null_mut();
+
+    let kind = unsafe {
+        private::JSValueGetTypedArrayType(context.get_ref(), value.get_ref(), &mut exception)
+    };
+
+    if kind == private::JSTypedArrayType_kJSTypedArrayTypeNone {
+        return None;
+    }
+
+    let object = value.to_object(context).ok()?;
+
+    if kind == private::JSTypedArrayType_kJSTypedArrayTypeArrayBuffer {
+        return object
+            .get_array_buffer(context)
+            .ok()
+            .map(|buffer| bytes::Bytes::copy_from_slice(buffer));
+    }
+
+    let object = rusty_jsc::private::JSObjectRef::from(object.clone());
+
+    // The pointer is the start of the backing buffer, so a view has to be
+    // taken from its own offset, or else it reads the wrong bytes
+    let bytes = unsafe {
+        let start =
+            private::JSObjectGetTypedArrayBytesPtr(context.get_ref(), object, &mut exception)
+                as *const u8;
+
+        if start.is_null() {
+            return None;
+        }
+
+        let offset =
+            private::JSObjectGetTypedArrayByteOffset(context.get_ref(), object, &mut exception);
+        let length =
+            private::JSObjectGetTypedArrayByteLength(context.get_ref(), object, &mut exception);
+
+        std::slice::from_raw_parts(start.add(offset as usize), length as usize)
+    };
+
+    Some(bytes::Bytes::copy_from_slice(bytes))
+}
+
 /// Message sent from JS to schedule async operations
 pub enum SchedulerMessage {
     /// Schedule a timeout: (callback_id, delay_ms)

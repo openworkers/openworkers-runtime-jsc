@@ -74,10 +74,14 @@ pub fn parse_fetch_options(
             headers = parse_headers_from_js(context, headers_val)?;
         }
 
-        if let Some(body_val) = defined_property(context, &options_obj, "body")
-            && let Ok(body_str) = body_val.to_js_string(context)
-        {
-            body = RequestBody::Bytes(Bytes::from(body_str.to_string()));
+        if let Some(body_val) = defined_property(context, &options_obj, "body") {
+            body = match super::typed_array_bytes(context, &body_val) {
+                Some(bytes) => RequestBody::Bytes(bytes),
+                None => match body_val.to_js_string(context) {
+                    Ok(text) => RequestBody::Bytes(Bytes::from(text.to_string())),
+                    Err(_) => RequestBody::None,
+                },
+            };
         }
     }
 

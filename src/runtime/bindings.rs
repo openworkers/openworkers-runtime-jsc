@@ -315,11 +315,7 @@ pub fn setup_fetch(
                         combined.set(chunk, offset);
                         offset += chunk.length;
                     }
-                    // Convert to string for the native fetch
-                    options = {
-                        ...options,
-                        body: new TextDecoder().decode(combined)
-                    };
+                    options = { ...options, body: combined };
                 } else {
                     options = { ...options, body: undefined };
                 }
