@@ -28,8 +28,8 @@
 
 ## Bindings
 
-- [ ] **Assets** — `ASSETS.fetch(path, options)`
-- [ ] **Storage** — `BUCKET.get()`, `put()`, `head()`, `list()`, `delete()`
-- [ ] **KV** — `KV.get()`, `put()`, `delete()`, `list()`
-- [ ] **Database** — `DB.query()`
-- [ ] **Worker** — `WORKER.fetch(options)`
+- [ ] **Assets** - `ASSETS.fetch(path, options)`
+- [ ] **Storage** - `BUCKET.get()`, `put()`, `head()`, `list()`, `delete()`
+- [ ] **KV** - `KV.get()`, `put()`, `delete()`, `list()`
+- [ ] **Database** - `DB.query()`
+- [ ] **Worker** - `WORKER.fetch(options)`
