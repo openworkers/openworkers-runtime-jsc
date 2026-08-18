@@ -1,8 +1,88 @@
-use super::{CallbackId, CallbackMap, SchedulerMessage, stream_manager::StreamId};
+use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
+
+/// JSC collects whatever JS cannot reach, so pending callbacks live in a JS map
+/// rather than in a Rust one the collector never sees
+const CALLBACK_REGISTRY_JS: &str = r#"
+    (function() {
+        const callbacks = new Map();
+
+        globalThis.__storeCallback = function(id, callback) {
+            callbacks.set(id, callback);
+        };
+
+        globalThis.__dropCallback = function(id) {
+            callbacks.delete(id);
+        };
+
+        globalThis.__runCallback = function(id, ...args) {
+            const callback = callbacks.get(id);
+            callbacks.delete(id);
+
+            if (callback !== undefined) {
+                callback(...args);
+            }
+        };
+
+        globalThis.__runRepeatingCallback = function(id, ...args) {
+            const callback = callbacks.get(id);
+
+            if (callback !== undefined) {
+                callback(...args);
+            }
+        };
+    })();
+"#;
+
+/// Setup the registry that keeps pending callbacks reachable from JS
+pub fn setup_callback_registry(context: &mut JSContext) {
+    context
+        .evaluate_script(CALLBACK_REGISTRY_JS, 1)
+        .expect("Failed to setup the callback registry");
+}
+
+/// Call a function held by the global object
+pub(crate) fn call_global(
+    context: &JSContext,
+    name: &str,
+    args: &[JSValue],
+) -> Result<JSValue, JSValue> {
+    let function = context
+        .get_global_object()
+        .get_property(context, name)
+        .ok_or_else(|| JSValue::string(context, format!("{} is missing", name)))?
+        .to_object(context)?;
+
+    function.call_as_function(context, None, args)
+}
+
+/// Hand a callback to the JS registry, which owns it until it runs or is dropped
+fn store_callback(
+    context: &JSContext,
+    callback_id: CallbackId,
+    callback: JSObject,
+) -> Result<(), JSValue> {
+    let id = JSValue::number(context, callback_id as f64);
+
+    call_global(context, "__storeCallback", &[id, callback.into()])?;
+
+    Ok(())
+}
+
+fn drop_callback(context: &JSContext, callback_id: CallbackId) {
+    let id = JSValue::number(context, callback_id as f64);
+
+    if let Err(e) = call_global(context, "__dropCallback", &[id]) {
+        log::error!(
+            "Failed to drop callback {}: {}",
+            callback_id,
+            super::error_text(context, &e)
+        );
+    }
+}
 
 /// Setup console bindings (log, info, warn, error, debug)
 pub fn setup_console(context: &mut JSContext) {
@@ -114,11 +194,9 @@ pub fn setup_microtask(context: &mut JSContext) {
 pub fn setup_fetch(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     let scheduler_tx_clone = scheduler_tx;
-    let callbacks_clone = callbacks;
     let next_id_clone = next_id;
 
     // Create fetch function
@@ -177,10 +255,7 @@ pub fn setup_fetch(
             };
 
             // Store resolve callback (we'll call it with Response or Error)
-            {
-                let mut cbs = callbacks_clone.borrow_mut();
-                cbs.insert(callback_id, resolve_callback);
-            }
+            store_callback(&ctx, callback_id, resolve_callback)?;
 
             log::debug!(
                 "fetch: scheduled streaming {} {} (promise_id: {})",
@@ -263,39 +338,24 @@ pub fn setup_fetch(
 pub fn setup_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
-    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
     // Setup setTimeout
-    setup_set_timeout(
-        context,
-        scheduler_tx.clone(),
-        callbacks.clone(),
-        next_id.clone(),
-    );
+    setup_set_timeout(context, scheduler_tx.clone(), next_id.clone());
 
     // Setup setInterval
-    setup_set_interval(
-        context,
-        scheduler_tx.clone(),
-        callbacks.clone(),
-        next_id.clone(),
-        intervals.clone(),
-    );
+    setup_set_interval(context, scheduler_tx.clone(), next_id);
 
     // Setup clearTimeout and clearInterval (same implementation)
-    setup_clear_timer(context, scheduler_tx.clone(), callbacks, intervals);
+    setup_clear_timer(context, scheduler_tx);
 }
 
 /// Setup setTimeout binding
 fn setup_set_timeout(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
-    let callbacks_clone = callbacks;
     let next_id_clone = next_id;
     let scheduler_tx_clone = scheduler_tx;
 
@@ -327,11 +387,7 @@ fn setup_set_timeout(
                 id
             };
 
-            // Store the callback
-            {
-                let mut cbs = callbacks_clone.borrow_mut();
-                cbs.insert(callback_id, callback);
-            }
+            store_callback(&ctx, callback_id, callback)?;
 
             // Schedule the timeout
             let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleTimeout(callback_id, delay));
@@ -358,14 +414,10 @@ fn setup_set_timeout(
 fn setup_set_interval(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
-    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
-    let callbacks_clone = callbacks;
     let next_id_clone = next_id;
     let scheduler_tx_clone = scheduler_tx;
-    let intervals_clone = intervals;
 
     // Create setInterval function
     let set_interval = rusty_jsc::callback_closure!(
@@ -395,17 +447,7 @@ fn setup_set_interval(
                 id
             };
 
-            // Store the callback
-            {
-                let mut cbs = callbacks_clone.borrow_mut();
-                cbs.insert(callback_id, callback);
-            }
-
-            // Mark as interval
-            {
-                let mut intervals = intervals_clone.lock().unwrap();
-                intervals.insert(callback_id);
-            }
+            store_callback(&ctx, callback_id, callback)?;
 
             // Schedule the interval
             let _ =
@@ -433,12 +475,8 @@ fn setup_set_interval(
 fn setup_clear_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
-    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
     let scheduler_tx_clone = scheduler_tx.clone();
-    let callbacks_clone = callbacks.clone();
-    let intervals_clone = intervals.clone();
 
     // Create clearTimeout function
     let clear_timeout = rusty_jsc::callback_closure!(
@@ -455,8 +493,7 @@ fn setup_clear_timer(
             };
 
             // Drop the stored callback, or else it leaks until worker teardown
-            callbacks_clone.borrow_mut().remove(&timer_id);
-            intervals_clone.lock().unwrap().remove(&timer_id);
+            drop_callback(&ctx, timer_id);
 
             // Send clear message
             let _ = scheduler_tx_clone.send(SchedulerMessage::ClearTimer(timer_id));
@@ -483,8 +520,7 @@ fn setup_clear_timer(
                 Err(_) => return Ok(JSValue::undefined(&ctx)),
             };
 
-            callbacks.borrow_mut().remove(&timer_id);
-            intervals.lock().unwrap().remove(&timer_id);
+            drop_callback(&ctx, timer_id);
 
             // Send clear message
             let _ = scheduler_tx_clone2.send(SchedulerMessage::ClearTimer(timer_id));
@@ -509,14 +545,12 @@ fn setup_clear_timer(
 pub fn setup_stream_ops(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     // Create __nativeStreamRead(stream_id, resolve_callback)
     // This is called from JS to request the next chunk from a stream
     let scheduler_tx_clone = scheduler_tx.clone();
-    let callbacks_clone = callbacks.clone();
-    let next_id_clone = next_id.clone();
+    let next_id_clone = next_id;
 
     let stream_read = rusty_jsc::callback_closure!(
         context,
@@ -548,11 +582,7 @@ pub fn setup_stream_ops(
                 id
             };
 
-            // Store callback
-            {
-                let mut cbs = callbacks_clone.borrow_mut();
-                cbs.insert(callback_id, callback);
-            }
+            store_callback(&ctx, callback_id, callback)?;
 
             // Send StreamRead message to scheduler
             let _ = scheduler_tx_clone.send(SchedulerMessage::StreamRead(callback_id, stream_id));

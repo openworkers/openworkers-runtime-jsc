@@ -14,10 +14,7 @@ mod url;
 pub use fetch::parse_fetch_options;
 
 use openworkers_core::{HttpRequest, HttpResponseMeta};
-use rusty_jsc::{JSContext, JSObject, JSValue};
-use std::cell::RefCell;
-use std::collections::HashMap;
-use std::rc::Rc;
+use rusty_jsc::{JSContext, JSValue};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
@@ -25,8 +22,13 @@ use tokio::sync::mpsc;
 /// Unique ID for callbacks
 pub type CallbackId = u64;
 
-/// Rc, not Arc: a JSObject may only be touched from its own context's thread
-pub(crate) type CallbackMap = Rc<RefCell<HashMap<CallbackId, JSObject>>>;
+/// Read a thrown value, which itself may throw
+pub(crate) fn error_text(context: &JSContext, error: &JSValue) -> String {
+    match error.to_js_string(context) {
+        Ok(text) => text.to_string(),
+        Err(_) => "unknown error".to_string(),
+    }
+}
 
 /// Message sent from JS to schedule async operations
 pub enum SchedulerMessage {
@@ -72,10 +74,6 @@ pub struct Runtime {
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     /// Channel to receive callback messages from the event loop
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
-    /// Stored callbacks (callback_id -> JSObject function) - shared with bindings
-    pub(crate) callbacks: CallbackMap,
-    /// Track which callbacks are intervals (vs timeouts) - shared with bindings
-    pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
     /// Stream manager for handling streaming responses
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
 }
@@ -90,13 +88,13 @@ impl Runtime {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
-        let callbacks: CallbackMap = Rc::new(RefCell::new(HashMap::new()));
         let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
-        let intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>> =
-            Arc::new(Mutex::new(std::collections::HashSet::new()));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         let mut context = JSContext::default();
+
+        // Setup the registry every pending callback is stored in
+        bindings::setup_callback_registry(&mut context);
 
         // Setup queueMicrotask
         bindings::setup_microtask(&mut context);
@@ -126,29 +124,13 @@ impl Runtime {
         crypto::setup_crypto(&mut context);
 
         // Setup fetch API
-        bindings::setup_fetch(
-            &mut context,
-            scheduler_tx.clone(),
-            callbacks.clone(),
-            next_callback_id.clone(),
-        );
+        bindings::setup_fetch(&mut context, scheduler_tx.clone(), next_callback_id.clone());
 
         // Setup timer bindings (pass shared state)
-        bindings::setup_timer(
-            &mut context,
-            scheduler_tx.clone(),
-            callbacks.clone(),
-            next_callback_id.clone(),
-            intervals.clone(),
-        );
+        bindings::setup_timer(&mut context, scheduler_tx.clone(), next_callback_id.clone());
 
         // Setup stream operations for native streaming
-        bindings::setup_stream_ops(
-            &mut context,
-            scheduler_tx.clone(),
-            callbacks.clone(),
-            next_callback_id.clone(),
-        );
+        bindings::setup_stream_ops(&mut context, scheduler_tx.clone(), next_callback_id);
 
         // Setup response stream operations for streaming all responses
         bindings::setup_response_stream_ops(&mut context, stream_manager.clone());
@@ -157,8 +139,6 @@ impl Runtime {
             context,
             scheduler_tx,
             callback_rx,
-            callbacks,
-            intervals,
             stream_manager: stream_manager.clone(),
         };
 
@@ -174,205 +154,56 @@ impl Runtime {
 
     pub fn handle_callback(&mut self, msg: CallbackMessage) {
         match msg {
-            CallbackMessage::ExecuteTimeout(callback_id) => {
-                // Timeouts are one-shot, intervals are not
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!("Executing timeout callback {}", callback_id);
-
-                    match callback.call_as_function(&self.context, None, &[]) {
-                        Ok(_) => log::debug!("Callback {} executed successfully", callback_id),
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Callback {} failed: {}", callback_id, err_str);
-                            } else {
-                                log::error!("Callback {} failed with unknown error", callback_id);
-                            }
-                        }
-                    }
-                }
-            }
-            CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!("Executing promise resolve callback {}", callback_id);
-
-                    let result_val = JSValue::string(&self.context, result_str.as_str());
-                    match callback.call_as_function(&self.context, None, &[result_val]) {
-                        Ok(_) => log::debug!("Promise resolved successfully"),
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Promise resolve failed: {}", err_str);
-                            }
-                        }
-                    }
-                }
-            }
-            CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!("Executing promise reject callback {}", callback_id);
-
-                    let error_val = JSValue::string(&self.context, error_msg.as_str());
-                    match callback.call_as_function(&self.context, None, &[error_val]) {
-                        Ok(_) => log::debug!("Promise rejected successfully"),
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Promise reject failed: {}", err_str);
-                            }
-                        }
-                    }
-                }
-            }
-            CallbackMessage::FetchError(callback_id, error_msg) => {
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!("Rejecting fetch promise {}: {}", callback_id, error_msg);
-
-                    let error_val = JSValue::string(&self.context, error_msg.as_str());
-                    match callback.call_as_function(&self.context, None, &[error_val]) {
-                        Ok(_) => log::debug!("Fetch promise rejected successfully"),
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Fetch reject callback failed: {}", err_str);
-                            }
-                        }
-                    }
-                }
-            }
+            CallbackMessage::ExecuteTimeout(callback_id) => self.run_callback(callback_id, &[]),
             CallbackMessage::ExecuteInterval(callback_id) => {
-                let callback_opt = {
-                    let cbs = self.callbacks.borrow();
-                    cbs.get(&callback_id).cloned()
-                };
+                // Intervals stay registered until they are cleared
+                self.call_registry("__runRepeatingCallback", callback_id, &[])
+            }
+            CallbackMessage::ExecutePromiseResolve(callback_id, result)
+            | CallbackMessage::ExecutePromiseReject(callback_id, result)
+            | CallbackMessage::FetchError(callback_id, result) => {
+                let value = JSValue::string(&self.context, result.as_str());
 
-                if let Some(callback) = callback_opt {
-                    let is_active = {
-                        let intervals = self.intervals.lock().unwrap();
-                        intervals.contains(&callback_id)
-                    };
-
-                    if !is_active {
-                        log::debug!("Interval {} was cleared, skipping execution", callback_id);
-                        return;
-                    }
-
-                    log::debug!("Executing interval callback {}", callback_id);
-
-                    match callback.call_as_function(&self.context, None, &[]) {
-                        Ok(_) => log::debug!("Interval {} executed successfully", callback_id),
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Interval {} failed: {}", callback_id, err_str);
-                            } else {
-                                log::error!("Interval {} failed with unknown error", callback_id);
-                            }
-                        }
-                    }
-                }
+                self.run_callback(callback_id, &[value]);
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!(
-                        "Resolving fetch streaming promise {} with stream {}",
-                        callback_id,
-                        stream_id
-                    );
-
-                    // The status text lands in JS source, so JSON-encode it
-                    let headers_json =
-                        serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
-                    let status_text_json = serde_json::to_string(&meta.status_text)
-                        .unwrap_or_else(|_| "\"\"".to_string());
-                    let response_script = format!(
-                        r#"new Response(__createNativeStream({}), {{
-                                status: {},
-                                statusText: {},
-                                headers: {}
-                            }})"#,
-                        stream_id, meta.status, status_text_json, headers_json
-                    );
-
-                    match self.context.evaluate_script(&response_script, 1) {
-                        Ok(response_obj) => {
-                            match callback.call_as_function(&self.context, None, &[response_obj]) {
-                                Ok(_) => log::debug!("Fetch streaming resolved successfully"),
-                                Err(e) => {
-                                    if let Ok(err_str) = e.to_js_string(&self.context) {
-                                        log::error!("Fetch streaming callback failed: {}", err_str);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Failed to create streaming Response: {}", err_str);
-                            }
-                        }
-                    }
+                match self.make_response(&meta, stream_id) {
+                    Ok(response) => self.run_callback(callback_id, &[response]),
+                    Err(e) => log::error!(
+                        "Failed to create streaming Response: {}",
+                        error_text(&self.context, &e)
+                    ),
                 }
             }
             CallbackMessage::StreamChunk(callback_id, chunk) => {
-                let callback_opt = {
-                    let mut cbs = self.callbacks.borrow_mut();
-                    cbs.remove(&callback_id)
-                };
-
-                if let Some(callback) = callback_opt {
-                    log::debug!("Executing stream chunk callback {}", callback_id);
-
-                    let result = match chunk {
-                        stream_manager::StreamChunk::Data(bytes) => self.make_chunk_result(&bytes),
-                        stream_manager::StreamChunk::Done => self
-                            .context
-                            .evaluate_script("({ done: true, value: undefined })", 1),
-                        stream_manager::StreamChunk::Error(err) => {
-                            let err_json = serde_json::to_string(&err).unwrap();
-                            self.context
-                                .evaluate_script(&format!("({{ error: {} }})", err_json), 1)
-                        }
-                    };
-
-                    match result {
-                        Ok(result_obj) => {
-                            match callback.call_as_function(&self.context, None, &[result_obj]) {
-                                Ok(_) => log::debug!("Stream chunk callback executed"),
-                                Err(e) => {
-                                    if let Ok(err_str) = e.to_js_string(&self.context) {
-                                        log::error!("Stream chunk callback failed: {}", err_str);
-                                    }
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            if let Ok(err_str) = e.to_js_string(&self.context) {
-                                log::error!("Failed to create stream result: {}", err_str);
-                            }
-                        }
-                    }
+                match self.make_chunk_result(chunk) {
+                    Ok(result) => self.run_callback(callback_id, &[result]),
+                    Err(e) => log::error!(
+                        "Failed to create stream result: {}",
+                        error_text(&self.context, &e)
+                    ),
                 }
             }
+        }
+    }
+
+    /// Run a callback and drop it; only interval ticks keep theirs
+    fn run_callback(&mut self, callback_id: CallbackId, args: &[JSValue]) {
+        self.call_registry("__runCallback", callback_id, args)
+    }
+
+    fn call_registry(&mut self, runner: &str, callback_id: CallbackId, args: &[JSValue]) {
+        log::debug!("Executing callback {}", callback_id);
+
+        let mut call_args = vec![JSValue::number(&self.context, callback_id as f64)];
+        call_args.extend_from_slice(args);
+
+        if let Err(e) = bindings::call_global(&self.context, runner, &call_args) {
+            log::error!(
+                "Callback {} failed: {}",
+                callback_id,
+                error_text(&self.context, &e)
+            );
         }
     }
 
@@ -399,13 +230,54 @@ impl Runtime {
         Ok(array)
     }
 
-    fn make_chunk_result(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
+    fn make_response(
+        &mut self,
+        meta: &HttpResponseMeta,
+        stream_id: stream_manager::StreamId,
+    ) -> Result<JSValue, JSValue> {
+        // The headers and the status text land in JS source, so JSON-encode them
+        let headers_json = serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
+        let status_text_json =
+            serde_json::to_string(&meta.status_text).unwrap_or_else(|_| "\"\"".to_string());
+
+        let script = format!(
+            r#"new Response(__createNativeStream({}), {{
+                    status: {},
+                    statusText: {},
+                    headers: {}
+                }})"#,
+            stream_id, meta.status, status_text_json, headers_json
+        );
+
+        self.context.evaluate_script(&script, 1)
+    }
+
+    fn make_chunk_result(
+        &mut self,
+        chunk: stream_manager::StreamChunk,
+    ) -> Result<JSValue, JSValue> {
+        let bytes = match chunk {
+            stream_manager::StreamChunk::Data(bytes) => bytes,
+            stream_manager::StreamChunk::Done => {
+                return self
+                    .context
+                    .evaluate_script("({ done: true, value: undefined })", 1);
+            }
+            stream_manager::StreamChunk::Error(err) => {
+                let err_json = serde_json::to_string(&err).unwrap();
+
+                return self
+                    .context
+                    .evaluate_script(&format!("({{ error: {} }})", err_json), 1);
+            }
+        };
+
         let wrap = self
             .context
             .evaluate_script("(value => ({ done: false, value }))", 1)?
             .to_object(&self.context)?;
 
-        let value = self.new_uint8_array(bytes)?;
+        let value = self.new_uint8_array(&bytes)?;
 
         wrap.call_as_function(&self.context, None, &[value])
     }
