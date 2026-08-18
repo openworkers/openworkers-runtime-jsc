@@ -59,8 +59,14 @@ fn apply(url: &mut Url, part: &str, value: &str) {
             let _ = url.set_password(password);
         }
         "host" => {
-            let (hostname, port) = match value.split_once(':') {
-                Some((hostname, port)) => (hostname, Some(port)),
+            // An IPv6 literal is bracketed and carries colons of its own
+            let host_end = value.rfind(']').map(|end| end + 1).unwrap_or(0);
+
+            let (hostname, port) = match value[host_end..].find(':') {
+                Some(colon) => (
+                    &value[..host_end + colon],
+                    Some(&value[host_end + colon + 1..]),
+                ),
                 None => (value, None),
             };
 

@@ -270,3 +270,22 @@ async fn test_url_search_params_decodes_plus_and_percent() {
 
     runner.shutdown().await;
 }
+
+#[tokio::test]
+async fn test_host_setter_keeps_an_ipv6_literal() {
+    let mut runner = TestRunner::new();
+
+    let script = r#"
+        const url = new URL('http://example.com/path');
+        url.host = '[::1]:8080';
+
+        globalThis.result = [url.hostname, url.port, url.href].join(' ');
+    "#;
+
+    assert_eq!(
+        eval_result(&mut runner, script),
+        "[::1] 8080 http://[::1]:8080/path"
+    );
+
+    runner.shutdown().await;
+}
