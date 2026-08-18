@@ -93,6 +93,23 @@ pub fn setup_headers(context: &mut JSContext) {
                 return cookies;
             }
         };
+
+        // Native code enumerates own properties, which on a Headers yields its backing Map
+        globalThis.__normalizeHeaders = function(init) {
+            const plain = {};
+
+            if (!init) {
+                return plain;
+            }
+
+            const headers = init instanceof Headers ? init : new Headers(init);
+
+            for (const [name, value] of headers) {
+                plain[name] = value;
+            }
+
+            return plain;
+        };
     "#;
 
     context

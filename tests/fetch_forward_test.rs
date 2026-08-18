@@ -115,6 +115,82 @@ async fn test_fetch_forward_headers() {
     assert!(!response.headers.is_empty(), "Should have headers");
 }
 
+/// A Headers instance must reach the native side as real header entries
+#[tokio::test]
+async fn test_fetch_with_headers_instance() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const headers = new Headers({ 'X-Token': 'secret' });
+            headers.append('x-extra', 'value');
+
+            event.respondWith(fetch('https://echo.workers.rocks/get', { headers }));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new_with_ops(script_obj, None, ops())
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/test".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Channel should not close");
+    let body = response.body.collect().await.expect("Should have body");
+    let echoed: serde_json::Value =
+        serde_json::from_slice(&body).expect("Mock should echo the request");
+
+    assert_eq!(echoed["headers"]["x-token"], "secret");
+    assert_eq!(echoed["headers"]["x-extra"], "value");
+}
+
+/// fetch(request) must forward the Request url, method and headers
+#[tokio::test]
+async fn test_fetch_with_request_input() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const request = new Request('https://echo.workers.rocks/post', {
+                method: 'POST',
+                headers: { 'x-token': 'secret' },
+                body: 'payload'
+            });
+
+            event.respondWith(fetch(request));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new_with_ops(script_obj, None, ops())
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/test".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Channel should not close");
+    let body = response.body.collect().await.expect("Should have body");
+    let echoed: serde_json::Value =
+        serde_json::from_slice(&body).expect("Mock should echo the request");
+
+    assert_eq!(echoed["url"], "https://echo.workers.rocks/post");
+    assert_eq!(echoed["method"], "Post");
+    assert_eq!(echoed["headers"]["x-token"], "secret");
+}
+
 /// Every byte value must survive the Rust -> JS chunk path unchanged
 #[tokio::test]
 async fn test_fetch_binary_roundtrip() {

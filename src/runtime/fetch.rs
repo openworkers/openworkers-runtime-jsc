@@ -15,7 +15,16 @@ pub fn parse_headers_from_js(
 ) -> Result<HashMap<String, String>, String> {
     let mut headers = HashMap::new();
 
-    let headers_obj = headers_val
+    // A Headers instance carries its entries in a Map, not in own properties
+    let normalize = context
+        .get_global_object()
+        .get_property(context, "__normalizeHeaders")
+        .and_then(|value| value.to_object(context).ok())
+        .ok_or("__normalizeHeaders is missing")?;
+
+    let headers_obj = normalize
+        .call_as_function(context, None, &[headers_val])
+        .map_err(|_| "Headers must be a HeadersInit")?
         .to_object(context)
         .map_err(|_| "Headers must be an object")?;
 

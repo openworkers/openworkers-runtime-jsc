@@ -205,7 +205,20 @@ pub fn setup_fetch(
 
     // Create JS wrapper that handles ReadableStream bodies
     let wrapper_code = r#"
-        globalThis.fetch = async function(url, options = {}) {
+        globalThis.fetch = async function(input, init) {
+            let options = { ...(init || {}) };
+            const isRequest = input instanceof Request;
+            const url = isRequest ? input.url : String(input);
+
+            if (isRequest) {
+                options.method = options.method || input.method;
+                options.headers = options.headers || input.headers;
+
+                if (options.body === undefined && input.body && !input.bodyUsed) {
+                    options.body = input.body;
+                }
+            }
+
             // If body is a ReadableStream, consume it first
             if (options && options.body instanceof ReadableStream) {
                 console.warn('[fetch] ReadableStream body detected - buffering entire stream before sending');
