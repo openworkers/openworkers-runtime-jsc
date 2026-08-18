@@ -1,3 +1,4 @@
+use bytes::Bytes;
 use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
@@ -284,4 +285,74 @@ async fn test_request_arraybuffer() {
     assert_eq!(result["length"], 5);
     assert_eq!(result["first"], 1);
     assert_eq!(result["last"], 5);
+}
+
+/// Test that the event request body keeps bytes that are not valid JS source
+#[tokio::test]
+async fn test_event_request_binary_body() {
+    let script = r#"
+        addEventListener('fetch', async (event) => {
+            const bytes = new Uint8Array(await event.request.arrayBuffer());
+            event.respondWith(new Response(Array.from(bytes).join(',')));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Post,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::Bytes(Bytes::from_static(&[0, 34, 92, 10, 255])),
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "0,34,92,10,255");
+}
+
+/// Test that a quote in the request URL cannot inject JS
+#[tokio::test]
+async fn test_event_request_url_with_quote() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            event.respondWith(new Response(event.request.url));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let url = r#"https://example.com/?q="+(globalThis.injected=1)+""#;
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: url.to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), url);
+
+    let injected = worker
+        .evaluate("typeof globalThis.injected")
+        .expect("Should evaluate");
+    let injected = injected
+        .to_js_string(worker.context())
+        .expect("Should be a string");
+
+    assert_eq!(injected.to_string(), "undefined");
 }

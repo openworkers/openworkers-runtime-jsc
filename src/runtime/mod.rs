@@ -391,30 +391,33 @@ impl Runtime {
         self.context.evaluate_script(script, 1)
     }
 
-    /// Build a `{ done: false, value: Uint8Array }` stream result, copying the
-    /// bytes into a JS-owned buffer instead of formatting them into source text
-    fn make_chunk_result(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
-        let script = format!(
-            "({{ done: false, value: new Uint8Array({}) }})",
-            bytes.len()
-        );
-        let result_val = self.context.evaluate_script(&script, 1)?;
+    /// Copy bytes into a JS-owned Uint8Array; source text is not binary-safe
+    pub(crate) fn new_uint8_array(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
+        let script = format!("new Uint8Array({})", bytes.len());
+        let array = self.context.evaluate_script(&script, 1)?;
 
         if bytes.is_empty() {
-            return Ok(result_val);
+            return Ok(array);
         }
 
-        let value_obj = result_val
-            .to_object(&self.context)?
-            .get_property(&self.context, "value")
-            .ok_or_else(|| JSValue::string(&self.context, "missing chunk value"))?
-            .to_object(&self.context)?;
+        let array_obj = array.to_object(&self.context)?;
 
         // Safe: the buffer is only written here, before any further JSC call
-        let buffer = unsafe { value_obj.get_typed_array_buffer(&self.context)? };
+        let buffer = unsafe { array_obj.get_typed_array_buffer(&self.context)? };
         buffer.copy_from_slice(bytes);
 
-        Ok(result_val)
+        Ok(array)
+    }
+
+    fn make_chunk_result(&mut self, bytes: &[u8]) -> Result<JSValue, JSValue> {
+        let wrap = self
+            .context
+            .evaluate_script("(value => ({ done: false, value }))", 1)?
+            .to_object(&self.context)?;
+
+        let value = self.new_uint8_array(bytes)?;
+
+        wrap.call_as_function(&self.context, None, &[value])
     }
 }
 

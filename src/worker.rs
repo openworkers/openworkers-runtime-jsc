@@ -151,40 +151,9 @@ impl Worker {
         &mut self,
         fetch_init: openworkers_core::FetchInit,
     ) -> Result<HttpResponse, TerminationReason> {
-        let req = &fetch_init.req;
-
-        // Build headers object for JS
-        let headers_json = serde_json::to_string(&req.headers).unwrap_or("{}".to_string());
-
-        // Create Request object
-        let body_str = match &req.body {
-            RequestBody::Bytes(bytes) => String::from_utf8(bytes.to_vec()).unwrap_or_default(),
-            RequestBody::Stream(_) => String::new(), // Stream body not supported for now
-            RequestBody::None => String::new(),
-        };
-
-        let request_script = format!(
-            r#"({{
-                method: "{}",
-                url: "{}",
-                headers: new Headers({}),
-                text: () => Promise.resolve("{}"),
-                json: () => Promise.resolve(JSON.parse("{}")),
-            }})"#,
-            req.method,
-            req.url,
-            headers_json,
-            body_str.replace('"', "\\\""),
-            body_str.replace('"', "\\\""),
-        );
-
-        let request_obj = self
-            .runtime
-            .context
-            .evaluate_script(&request_script, 1)
-            .map_err(|_| {
-                TerminationReason::Exception("Failed to create Request object".to_string())
-            })?;
+        let request_obj = self.make_request_object(&fetch_init.req).map_err(|_| {
+            TerminationReason::Exception("Failed to create Request object".to_string())
+        })?;
 
         // The handler reports the response metadata via the native __completeEvent
         let done_rx = self.install_completion_channel();
@@ -409,6 +378,43 @@ impl Worker {
         let _ = task_init.res_tx.send(task_result);
 
         Ok(())
+    }
+
+    fn make_request_object(
+        &mut self,
+        req: &openworkers_core::HttpRequest,
+    ) -> Result<rusty_jsc::JSValue, rusty_jsc::JSValue> {
+        let build_request_script = r#"
+            (function(method, url, headers, body) {
+                return new Request(url, {
+                    method: method,
+                    headers: JSON.parse(headers),
+                    body: body.length > 0 ? body : null
+                });
+            })
+        "#;
+
+        let build_request = self
+            .runtime
+            .context
+            .evaluate_script(build_request_script, 1)?
+            .to_object(&self.runtime.context)?;
+
+        let headers_json = serde_json::to_string(&req.headers).expect("headers are strings");
+
+        let context = &self.runtime.context;
+        let method = rusty_jsc::JSValue::string(context, req.method.as_str());
+        let url = rusty_jsc::JSValue::string(context, req.url.as_str());
+        let headers = rusty_jsc::JSValue::string(context, headers_json.as_str());
+
+        let body: &[u8] = match &req.body {
+            RequestBody::Bytes(bytes) => bytes,
+            RequestBody::Stream(_) | RequestBody::None => &[],
+        };
+
+        let body = self.runtime.new_uint8_array(body)?;
+
+        build_request.call_as_function(&self.runtime.context, None, &[method, url, headers, body])
     }
 
     /// Arm the completion channel for the next event execution
