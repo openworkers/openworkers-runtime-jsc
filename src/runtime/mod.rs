@@ -171,20 +171,6 @@ impl Runtime {
         (runtime, scheduler_rx, callback_tx, stream_manager)
     }
 
-    /// Clear a timer (remove from callbacks and intervals)
-    pub fn clear_timer(&mut self, callback_id: CallbackId) {
-        let mut cbs = self.callbacks.lock().unwrap();
-        cbs.remove(&callback_id);
-
-        let mut intervals = self.intervals.lock().unwrap();
-        intervals.remove(&callback_id);
-
-        // Send clear message to event loop
-        let _ = self
-            .scheduler_tx
-            .send(SchedulerMessage::ClearTimer(callback_id));
-    }
-
     /// Process pending callbacks (non-blocking)
     pub fn process_callbacks(&mut self) {
         while let Ok(msg) = self.callback_rx.try_recv() {

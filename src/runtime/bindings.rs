@@ -285,11 +285,11 @@ pub fn setup_timer(
         scheduler_tx.clone(),
         callbacks.clone(),
         next_id.clone(),
-        intervals,
+        intervals.clone(),
     );
 
     // Setup clearTimeout and clearInterval (same implementation)
-    setup_clear_timer(context, scheduler_tx.clone());
+    setup_clear_timer(context, scheduler_tx.clone(), callbacks, intervals);
 }
 
 /// Setup setTimeout binding
@@ -437,8 +437,12 @@ fn setup_set_interval(
 fn setup_clear_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
     let scheduler_tx_clone = scheduler_tx.clone();
+    let callbacks_clone = callbacks.clone();
+    let intervals_clone = intervals.clone();
 
     // Create clearTimeout function
     let clear_timeout = rusty_jsc::callback_closure!(
@@ -453,6 +457,10 @@ fn setup_clear_timer(
                 Ok(id) => id as u64,
                 Err(_) => return Ok(JSValue::undefined(&ctx)),
             };
+
+            // Drop the stored callback, or else it leaks until worker teardown
+            callbacks_clone.lock().unwrap().remove(&timer_id);
+            intervals_clone.lock().unwrap().remove(&timer_id);
 
             // Send clear message
             let _ = scheduler_tx_clone.send(SchedulerMessage::ClearTimer(timer_id));
@@ -478,6 +486,9 @@ fn setup_clear_timer(
                 Ok(id) => id as u64,
                 Err(_) => return Ok(JSValue::undefined(&ctx)),
             };
+
+            callbacks.lock().unwrap().remove(&timer_id);
+            intervals.lock().unwrap().remove(&timer_id);
 
             // Send clear message
             let _ = scheduler_tx_clone2.send(SchedulerMessage::ClearTimer(timer_id));
