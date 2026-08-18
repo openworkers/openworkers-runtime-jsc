@@ -3,9 +3,6 @@ name = "openworkers-runtime-jsc"
 version = "0.14.0"
 edition = "2024"
 
-[features]
-actix = ["dep:actix-web", "openworkers-core/actix"]
-
 [dependencies]
 # Common types
 # openworkers-core = { path = "../openworkers-core", features = ["testing"] }
@@ -38,7 +35,4 @@ tokio-stream = "0.1"
 # Crypto
 ring = "0.17"
 uuid = { version = "1.0", features = ["v4"] }
-
-# Optional dependencies for examples/integration
-actix-web = { version = "4.12.0", features = ["macros"], optional = true }
 
