@@ -181,6 +181,13 @@ async fn main() {
     println!("lowered to classic script in {}", ms(lower_time));
     println!("script handed to the runtime: {} bytes\n", source.len());
 
+    // An empty worker separates our own global setup from the cost of the bundle
+    let bootstrap_start = Instant::now();
+    let bootstrap = spawn_worker("").await.expect("empty worker should load");
+    let bootstrap_time = bootstrap_start.elapsed();
+
+    drop(bootstrap);
+
     let rss_before = rss_kb();
 
     let create_start = Instant::now();
@@ -297,6 +304,11 @@ async fn main() {
 
     println!("\n| {:<38} | {:>10} | {:>10} |", "phase", "min", "median");
     println!("|{:-<40}|{:-<12}|{:-<12}|", "", "", "");
+    row(
+        "runtime bootstrap (empty script)",
+        bootstrap_time,
+        bootstrap_time,
+    );
     row(
         "worker creation (parse+compile+init)",
         create_time,
