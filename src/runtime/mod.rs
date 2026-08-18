@@ -305,15 +305,18 @@ impl Runtime {
                         stream_id
                     );
 
+                    // The status text lands in JS source, so JSON-encode it
                     let headers_json =
                         serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
+                    let status_text_json = serde_json::to_string(&meta.status_text)
+                        .unwrap_or_else(|_| "\"\"".to_string());
                     let response_script = format!(
                         r#"new Response(__createNativeStream({}), {{
                                 status: {},
-                                statusText: "{}",
+                                statusText: {},
                                 headers: {}
                             }})"#,
-                        stream_id, meta.status, meta.status_text, headers_json
+                        stream_id, meta.status, status_text_json, headers_json
                     );
 
                     match self.context.evaluate_script(&response_script, 1) {

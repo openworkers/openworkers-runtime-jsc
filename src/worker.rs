@@ -293,17 +293,17 @@ impl Worker {
             .map(|t| t.to_string())
             .unwrap_or_else(|| "undefined".to_string());
 
+        // Splice only JSON, or else a quote or a backslash in the task id breaks out
+        let task_id_json = serde_json::to_string(&task_init.task_id).expect("task id is a string");
+
         let event_script = format!(
             r#"({{
-                taskId: "{}",
+                taskId: {},
                 attempt: {},
                 payload: {},
                 scheduledTime: {}
             }})"#,
-            task_init.task_id.replace('"', "\\\""),
-            task_init.attempt,
-            payload_json,
-            scheduled_time_js
+            task_id_json, task_init.attempt, payload_json, scheduled_time_js
         );
 
         let event_obj = self
