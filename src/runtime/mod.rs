@@ -577,7 +577,7 @@ async fn execute_fetch_via_ops(
     let meta = openworkers_core::HttpResponseMeta {
         status: response.status,
         status_text: status_text(response.status),
-        headers: response.headers.into_iter().collect(),
+        headers: response.headers,
     };
 
     let stream_id = stream_manager.create_stream("ops_fetch".to_string());
