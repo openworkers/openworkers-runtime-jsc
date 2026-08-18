@@ -16,6 +16,12 @@ fn request() -> HttpRequest {
     }
 }
 
+async fn collect(body: ResponseBody) -> String {
+    let bytes = body.collect().await.unwrap_or_default();
+
+    String::from_utf8_lossy(&bytes).to_string()
+}
+
 /// A slow handler is bounded only by the wall-clock limit,
 /// never by a fixed internal cap
 #[tokio::test]
@@ -52,21 +58,7 @@ async fn test_slow_response_within_wall_clock_limit() {
         elapsed
     );
 
-    let body = match response.body {
-        ResponseBody::Bytes(bytes) => String::from_utf8_lossy(&bytes).to_string(),
-        ResponseBody::Stream(mut rx) => {
-            let mut all_bytes = Vec::new();
-
-            while let Some(chunk) = rx.recv().await {
-                all_bytes.extend_from_slice(&chunk.expect("Chunk should not error"));
-            }
-
-            String::from_utf8_lossy(&all_bytes).to_string()
-        }
-        ResponseBody::None => String::new(),
-    };
-
-    assert_eq!(body, "late");
+    assert_eq!(collect(response.body).await, "late");
 }
 
 #[tokio::test]
@@ -98,4 +90,54 @@ async fn test_wall_clock_limit_enforced() {
         start.elapsed() < Duration::from_secs(5),
         "Timeout should fire well before the 5s timer"
     );
+}
+
+/// A worker outlives the events it times out, so the result of a timed out
+/// handler must never be served as the answer to a later request
+#[tokio::test]
+async fn test_late_completion_is_not_served_to_the_next_event() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const url = new URL(event.request.url);
+            const delay = Number(url.searchParams.get('delay'));
+            const body = url.searchParams.get('body');
+
+            event.respondWith(new Promise((resolve) => {
+                setTimeout(() => resolve(new Response(body)), delay);
+            }));
+        });
+    "#;
+
+    let limits = RuntimeLimits {
+        max_wall_clock_time_ms: 300,
+        ..Default::default()
+    };
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, Some(limits))
+        .await
+        .expect("Worker should initialize");
+
+    let slow = HttpRequest {
+        url: "https://example.com/?delay=400&body=SLOW".to_string(),
+        ..request()
+    };
+
+    let (task, _rx) = Event::fetch(slow);
+    let result = worker.exec(task).await;
+
+    assert_eq!(result, Err(TerminationReason::WallClockTimeout));
+
+    // The timer of the timed out event fires 100ms into this one
+    let fast = HttpRequest {
+        url: "https://example.com/?delay=200&body=FAST".to_string(),
+        ..request()
+    };
+
+    let (task, rx) = Event::fetch(fast);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Channel should not close");
+
+    assert_eq!(collect(response.body).await, "FAST");
 }

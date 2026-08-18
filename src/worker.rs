@@ -3,12 +3,45 @@ use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
     TaskInit, TaskResult, TaskSource, TerminationReason,
 };
+use std::cell::RefCell;
+use std::rc::Rc;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+
+/// Result slot of the running event, keyed by an epoch the handler echoes back,
+/// or else the late result of a timed out event answers the next request
+#[derive(Default)]
+struct Completion {
+    epoch: u64,
+    tx: Option<tokio::sync::oneshot::Sender<String>>,
+}
+
+impl Completion {
+    fn arm(&mut self) -> (u64, tokio::sync::oneshot::Receiver<String>) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+
+        self.epoch += 1;
+        self.tx = Some(tx);
+
+        (self.epoch, rx)
+    }
+
+    fn complete(&mut self, epoch: u64, result: String) {
+        if epoch != self.epoch {
+            log::warn!("dropping completion of event {}, event is gone", epoch);
+            return;
+        }
+
+        if let Some(tx) = self.tx.take() {
+            let _ = tx.send(result);
+        }
+    }
+}
 
 /// Worker that executes JavaScript with event handlers
 pub struct Worker {
     pub(crate) runtime: Runtime,
+    completion: Rc<RefCell<Completion>>,
     event_loop_handle: tokio::task::JoinHandle<()>,
     aborted: Arc<AtomicBool>,
     limits: RuntimeLimits,
@@ -42,9 +75,10 @@ impl Worker {
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
+        let completion = Rc::new(RefCell::new(Completion::default()));
 
         // Setup addEventListener binding
-        setup_event_listener(&mut runtime.context, runtime.completion_tx.clone());
+        setup_event_listener(&mut runtime.context, completion.clone());
 
         // Setup environment variables
         setup_env(&mut runtime.context, &script.env);
@@ -73,6 +107,7 @@ impl Worker {
 
         Ok(Self {
             runtime,
+            completion,
             event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
             limits: limits.unwrap_or_default(),
@@ -156,12 +191,12 @@ impl Worker {
         })?;
 
         // The handler reports the response metadata via the native __completeEvent
-        let done_rx = self.install_completion_channel();
+        let (epoch, done_rx) = self.completion.borrow_mut().arm();
 
         let trigger_script = r#"
-            (function(request) {
+            (function(request, epoch) {
                 if (typeof globalThis.__triggerFetch === 'function') {
-                    globalThis.__triggerFetch(request);
+                    globalThis.__triggerFetch(request, epoch);
                 } else {
                     throw new Error("No fetch handler registered");
                 }
@@ -178,8 +213,9 @@ impl Worker {
             .to_object(&self.runtime.context)
             .map_err(|_| TerminationReason::Exception("Trigger is not a function".to_string()))?;
 
+        let epoch = rusty_jsc::JSValue::number(&self.runtime.context, epoch as f64);
         let trigger_result =
-            trigger_fn.call_as_function(&self.runtime.context, None, &[request_obj]);
+            trigger_fn.call_as_function(&self.runtime.context, None, &[request_obj, epoch]);
 
         if let Err(e) = trigger_result {
             let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
@@ -313,15 +349,15 @@ impl Worker {
             .map_err(|_| TerminationReason::Exception("Failed to create event".to_string()))?;
 
         // The handler reports the task result via the native __completeEvent
-        let done_rx = self.install_completion_channel();
+        let (epoch, done_rx) = self.completion.borrow_mut().arm();
 
         // Try __taskHandler first, then fallback to __triggerScheduled for backward compat
         let trigger_script = r#"
-            (function(event) {
+            (function(event, epoch) {
                 if (typeof globalThis.__taskHandler === 'function') {
-                    return globalThis.__taskHandler(event);
+                    return globalThis.__taskHandler(event, epoch);
                 } else if (typeof globalThis.__triggerScheduled === 'function') {
-                    return globalThis.__triggerScheduled(event);
+                    return globalThis.__triggerScheduled(event, epoch);
                 }
                 throw new Error("No task handler registered");
             })
@@ -335,7 +371,11 @@ impl Worker {
             .to_object(&self.runtime.context)
             .map_err(|_| TerminationReason::Exception("Trigger not a function".to_string()))?;
 
-        if let Err(e) = trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj]) {
+        let epoch = rusty_jsc::JSValue::number(&self.runtime.context, epoch as f64);
+
+        if let Err(e) =
+            trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj, epoch])
+        {
             let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
                 let full_error = err_str.to_string();
                 log::error!("Task handler exception: {}", full_error);
@@ -415,15 +455,6 @@ impl Worker {
         build_request.call_as_function(&self.runtime.context, None, &[method, url, headers, body])
     }
 
-    /// Arm the completion channel for the next event execution
-    fn install_completion_channel(&mut self) -> tokio::sync::oneshot::Receiver<String> {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-
-        *self.runtime.completion_tx.lock().unwrap() = Some(tx);
-
-        rx
-    }
-
     /// Drive JS callbacks until the event completes, honoring the wall-clock limit
     async fn wait_for_completion(
         &mut self,
@@ -474,27 +505,23 @@ impl Drop for Worker {
 }
 
 /// Setup addEventListener binding
-fn setup_event_listener(
-    context: &mut rusty_jsc::JSContext,
-    completion_tx: std::sync::Arc<std::sync::Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
-) {
-    let completion_tx_clone = completion_tx.clone();
+fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCell<Completion>>) {
     let complete_event_callback = rusty_jsc::callback_closure!(
         context,
         move |ctx: rusty_jsc::JSContext,
               _function: rusty_jsc::JSObject,
               _this: rusty_jsc::JSObject,
               args: &[rusty_jsc::JSValue]| {
-            if args.is_empty() {
+            if args.len() < 2 {
                 return Ok(rusty_jsc::JSValue::undefined(&ctx));
             }
 
-            if let Ok(result_json) = args[0].to_js_string(&ctx) {
-                let result_str = result_json.to_string();
+            let epoch = args[0].to_number(&ctx).unwrap_or_default() as u64;
 
-                if let Some(tx) = completion_tx_clone.lock().unwrap().take() {
-                    let _ = tx.send(result_str);
-                }
+            if let Ok(result_json) = args[1].to_js_string(&ctx) {
+                completion
+                    .borrow_mut()
+                    .complete(epoch, result_json.to_string());
             }
 
             Ok(rusty_jsc::JSValue::undefined(&ctx))
@@ -571,24 +598,24 @@ fn setup_event_listener(
             };
         };
 
-        globalThis.__finishFetch = function(response) {
+        globalThis.__finishFetch = function(response, epoch) {
             return __streamResponseBody(response).then(resp => {
-                __completeEvent(JSON.stringify(__extractResponseMeta(resp)));
+                __completeEvent(epoch, JSON.stringify(__extractResponseMeta(resp)));
             });
         };
 
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
                 globalThis.__fetchHandler = handler;
-                globalThis.__triggerFetch = function(request) {
+                globalThis.__triggerFetch = function(request, epoch) {
                     const event = {
                         request: request,
                         respondWith: function(responseOrPromise) {
                             Promise.resolve(responseOrPromise)
-                                .then(response => __finishFetch(response))
+                                .then(response => __finishFetch(response, epoch))
                                 .catch(error => {
                                     console.error('[respondWith] Promise rejected:', error);
-                                    __finishFetch(new Response(null, { status: 500 }));
+                                    __finishFetch(new Response(null, { status: 500 }), epoch);
                                 });
                         }
                     };
@@ -598,11 +625,11 @@ fn setup_event_listener(
                         handler(event);
                     } catch (error) {
                         console.error('[addEventListener] Error in fetch handler:', error);
-                        __finishFetch(new Response(null, { status: 500 }));
+                        __finishFetch(new Response(null, { status: 500 }), epoch);
                     }
                 };
             } else if (type === 'scheduled') {
-                globalThis.__triggerScheduled = async function(event) {
+                globalThis.__triggerScheduled = async function(event, epoch) {
                     const promises = [];
 
                     event.waitUntil = function(promise) {
@@ -618,11 +645,11 @@ fn setup_event_listener(
                             await Promise.all(promises);
                         }
                     } finally {
-                        __completeEvent(JSON.stringify({ success: true }));
+                        __completeEvent(epoch, JSON.stringify({ success: true }));
                     }
                 };
             } else if (type === 'task') {
-                globalThis.__taskHandler = async function(event) {
+                globalThis.__taskHandler = async function(event, epoch) {
                     const waitUntilPromises = [];
 
                     // Default result (success with no data)
@@ -670,7 +697,7 @@ fn setup_event_listener(
                             error: error.message || String(error)
                         };
                     } finally {
-                        __completeEvent(JSON.stringify(globalThis.__taskResult));
+                        __completeEvent(epoch, JSON.stringify(globalThis.__taskResult));
                     }
                 };
             }

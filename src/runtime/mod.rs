@@ -76,8 +76,6 @@ pub struct Runtime {
     pub(crate) callbacks: CallbackMap,
     /// Track which callbacks are intervals (vs timeouts) - shared with bindings
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
-    /// Sender for the in-flight event result (set during fetch/task execution)
-    pub(crate) completion_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// Stream manager for handling streaming responses
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
 }
@@ -96,8 +94,6 @@ impl Runtime {
         let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
         let intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
-        let completion_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>> =
-            Arc::new(Mutex::new(None));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
         let mut context = JSContext::default();
@@ -163,7 +159,6 @@ impl Runtime {
             callback_rx,
             callbacks,
             intervals,
-            completion_tx,
             stream_manager: stream_manager.clone(),
         };
 
