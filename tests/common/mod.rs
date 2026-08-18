@@ -11,6 +11,7 @@ pub struct TestRunner {
 }
 
 impl TestRunner {
+    #[allow(dead_code)]
     pub fn new() -> Self {
         let ops: OperationsHandle = Arc::new(DefaultOps);
         Self::new_with_ops(ops)

@@ -1,4 +1,4 @@
-use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, ResponseBody, Script};
+use openworkers_core::{Event, HttpMethod, HttpRequest, RequestBody, Script};
 use openworkers_runtime_jsc::Worker;
 use std::collections::HashMap;
 
