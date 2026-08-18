@@ -246,25 +246,26 @@ impl Worker {
             headers: Vec<(String, String)>,
             #[serde(rename = "responseStreamId")]
             response_stream_id: Option<u64>,
-            #[serde(rename = "hasBody")]
-            has_body: bool,
         }
 
         let extracted: ExtractedResponse = serde_json::from_str(&json_str).map_err(|e| {
             TerminationReason::Exception(format!("Failed to parse extracted response: {}", e))
         })?;
 
-        // All responses with body are now streamed
-        let body = if let Some(stream_id) = extracted.response_stream_id {
-            // Take the receiver from stream manager
-            if let Some(rx) = self.runtime.stream_manager.take_receiver(stream_id) {
+        // Every response body is streamed, so no stream means no body
+        let stream = extracted
+            .response_stream_id
+            .and_then(|stream_id| self.runtime.stream_manager.take_receiver(stream_id));
+
+        let body = match stream {
+            None => ResponseBody::None,
+            Some(mut rx) => {
                 // Create bounded channel for HttpBody
                 const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
                 let (tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
 
                 // Spawn task to forward from StreamChunk to Result<Bytes, String>
                 tokio::spawn(async move {
-                    let mut rx = rx;
                     while let Some(chunk) = rx.recv().await {
                         match chunk {
                             StreamChunk::Data(bytes) => {
@@ -284,16 +285,7 @@ impl Worker {
                 });
 
                 ResponseBody::Stream(response_rx)
-            } else {
-                // Stream not found, return empty
-                ResponseBody::None
             }
-        } else if extracted.has_body {
-            // Has body but no stream ID - shouldn't happen, but handle it
-            ResponseBody::None
-        } else {
-            // No body
-            ResponseBody::None
         };
 
         // Send response back via channel
@@ -593,8 +585,7 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
             return {
                 status: resp.status || 200,
                 headers: headers,
-                responseStreamId: responseStreamId !== undefined ? responseStreamId : null,
-                hasBody: resp.body !== null
+                responseStreamId: responseStreamId !== undefined ? responseStreamId : null
             };
         };
 
