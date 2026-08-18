@@ -26,16 +26,16 @@ async fn test_url_parsing() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(pathname) = obj.get_property(&runner.runtime.context, "pathname") {
-                    if let Ok(pathname_str) = pathname.to_js_string(&runner.runtime.context) {
-                        assert_eq!(pathname_str.to_string(), "/path");
-                    }
+                if let Some(pathname) = obj.get_property(&runner.runtime.context, "pathname")
+                    && let Ok(pathname_str) = pathname.to_js_string(&runner.runtime.context)
+                {
+                    assert_eq!(pathname_str.to_string(), "/path");
                 }
 
-                if let Some(search) = obj.get_property(&runner.runtime.context, "search") {
-                    if let Ok(search_str) = search.to_js_string(&runner.runtime.context) {
-                        assert_eq!(search_str.to_string(), "?foo=bar");
-                    }
+                if let Some(search) = obj.get_property(&runner.runtime.context, "search")
+                    && let Ok(search_str) = search.to_js_string(&runner.runtime.context)
+                {
+                    assert_eq!(search_str.to_string(), "?foo=bar");
                 }
             }
         }
@@ -70,10 +70,10 @@ async fn test_url_search_params() {
                     assert!(has_foo.to_bool(&runner.runtime.context));
                 }
 
-                if let Some(foo_val) = obj.get_property(&runner.runtime.context, "foo") {
-                    if let Ok(foo_str) = foo_val.to_js_string(&runner.runtime.context) {
-                        assert_eq!(foo_str.to_string(), "bar");
-                    }
+                if let Some(foo_val) = obj.get_property(&runner.runtime.context, "foo")
+                    && let Ok(foo_str) = foo_val.to_js_string(&runner.runtime.context)
+                {
+                    assert_eq!(foo_str.to_string(), "bar");
                 }
 
                 if let Some(missing) = obj.get_property(&runner.runtime.context, "missing") {

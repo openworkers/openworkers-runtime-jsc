@@ -90,10 +90,10 @@ async fn test_fetch_basic_get() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(status_val) = obj.get_property(&runner.runtime.context, "status") {
-                    if let Ok(status) = status_val.to_number(&runner.runtime.context) {
-                        assert_eq!(status, 200.0, "Should get 200 OK response");
-                    }
+                if let Some(status_val) = obj.get_property(&runner.runtime.context, "status")
+                    && let Ok(status) = status_val.to_number(&runner.runtime.context)
+                {
+                    assert_eq!(status, 200.0, "Should get 200 OK response");
                 }
 
                 if let Some(ok_val) = obj.get_property(&runner.runtime.context, "ok") {

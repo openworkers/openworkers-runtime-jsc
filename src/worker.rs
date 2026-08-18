@@ -187,12 +187,11 @@ impl Worker {
                 log::error!("Fetch handler exception: {}", full_error);
 
                 // Try to get stack trace if available
-                if let Ok(err_obj) = e.to_object(&self.runtime.context) {
-                    if let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack") {
-                        if let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context) {
-                            log::error!("Stack trace:\n{}", stack_str);
-                        }
-                    }
+                if let Ok(err_obj) = e.to_object(&self.runtime.context)
+                    && let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack")
+                    && let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context)
+                {
+                    log::error!("Stack trace:\n{}", stack_str);
                 }
 
                 format!("Fetch handler exception: {}", full_error)
@@ -342,12 +341,11 @@ impl Worker {
                 log::error!("Task handler exception: {}", full_error);
 
                 // Try to get stack trace
-                if let Ok(err_obj) = e.to_object(&self.runtime.context) {
-                    if let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack") {
-                        if let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context) {
-                            log::error!("Stack trace:\n{}", stack_str);
-                        }
-                    }
+                if let Ok(err_obj) = e.to_object(&self.runtime.context)
+                    && let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack")
+                    && let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context)
+                {
+                    log::error!("Stack trace:\n{}", stack_str);
                 }
 
                 format!("Task handler exception: {}", full_error)

@@ -15,13 +15,18 @@ pub use fetch::parse_fetch_options;
 
 use openworkers_core::{HttpRequest, HttpResponseMeta};
 use rusty_jsc::{JSContext, JSObject, JSValue};
+use std::cell::RefCell;
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 use tokio::sync::mpsc;
 
 /// Unique ID for callbacks
 pub type CallbackId = u64;
+
+/// Rc, not Arc: a JSObject may only be touched from its own context's thread
+pub(crate) type CallbackMap = Rc<RefCell<HashMap<CallbackId, JSObject>>>;
 
 /// Message sent from JS to schedule async operations
 pub enum SchedulerMessage {
@@ -68,7 +73,7 @@ pub struct Runtime {
     /// Channel to receive callback messages from the event loop
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     /// Stored callbacks (callback_id -> JSObject function) - shared with bindings
-    pub(crate) callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    pub(crate) callbacks: CallbackMap,
     /// Track which callbacks are intervals (vs timeouts) - shared with bindings
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
     /// Sender for the in-flight event result (set during fetch/task execution)
@@ -87,8 +92,7 @@ impl Runtime {
         let (scheduler_tx, scheduler_rx) = mpsc::unbounded_channel();
         let (callback_tx, callback_rx) = mpsc::unbounded_channel();
 
-        let callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+        let callbacks: CallbackMap = Rc::new(RefCell::new(HashMap::new()));
         let next_callback_id: Arc<Mutex<CallbackId>> = Arc::new(Mutex::new(1));
         let intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>> =
             Arc::new(Mutex::new(std::collections::HashSet::new()));
@@ -179,7 +183,7 @@ impl Runtime {
             CallbackMessage::ExecuteTimeout(callback_id) => {
                 // Timeouts are one-shot: remove the callback after execution
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -202,7 +206,7 @@ impl Runtime {
             CallbackMessage::ExecutePromiseResolve(callback_id, result_str) => {
                 // Execute resolve callback with result
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -223,7 +227,7 @@ impl Runtime {
             CallbackMessage::ExecutePromiseReject(callback_id, error_msg) => {
                 // Execute reject callback with error
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -244,7 +248,7 @@ impl Runtime {
             CallbackMessage::FetchError(callback_id, error_msg) => {
                 // Execute fetch reject callback
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -265,7 +269,7 @@ impl Runtime {
             CallbackMessage::ExecuteInterval(callback_id) => {
                 // Intervals keep the callback for repeated execution
                 let callback_opt = {
-                    let cbs = self.callbacks.lock().unwrap();
+                    let cbs = self.callbacks.borrow();
                     cbs.get(&callback_id).cloned()
                 };
 
@@ -299,7 +303,7 @@ impl Runtime {
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
                 // Execute fetch resolve callback with a full Response object
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 
@@ -344,7 +348,7 @@ impl Runtime {
             CallbackMessage::StreamChunk(callback_id, chunk) => {
                 // Execute stream read callback with chunk result
                 let callback_opt = {
-                    let mut cbs = self.callbacks.lock().unwrap();
+                    let mut cbs = self.callbacks.borrow_mut();
                     cbs.remove(&callback_id)
                 };
 

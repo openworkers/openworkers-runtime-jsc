@@ -47,14 +47,12 @@ async fn test_settimeout_with_missing_args() {
 
     // Check that error was caught
     let check = r#"globalThis.caughtError === true"#;
-    match runner.runtime.evaluate(check) {
-        Ok(result) => {
-            assert!(
-                result.to_bool(&runner.runtime.context),
-                "setTimeout with no args should throw error"
-            );
-        }
-        Err(_) => {} // That's also acceptable
+    // An evaluation error is also acceptable here
+    if let Ok(result) = runner.runtime.evaluate(check) {
+        assert!(
+            result.to_bool(&runner.runtime.context),
+            "setTimeout with no args should throw error"
+        );
     }
 
     runner.shutdown().await;

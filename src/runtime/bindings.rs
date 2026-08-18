@@ -1,7 +1,6 @@
-use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
+use super::{CallbackId, CallbackMap, SchedulerMessage, stream_manager::StreamId};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
-use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
@@ -92,13 +91,10 @@ fn queue_microtask_fn(
         })
     "#;
 
-    match ctx.evaluate_script(script, 1) {
-        Ok(wrapper) => {
-            if let Ok(wrapper_fn) = wrapper.to_object(&ctx) {
-                let _ = wrapper_fn.call_as_function(&ctx, None, &[callback.into()]);
-            }
-        }
-        Err(_) => {}
+    if let Ok(wrapper) = ctx.evaluate_script(script, 1)
+        && let Ok(wrapper_fn) = wrapper.to_object(&ctx)
+    {
+        let _ = wrapper_fn.call_as_function(&ctx, None, &[callback.into()]);
     }
 
     Ok(JSValue::undefined(&ctx))
@@ -118,7 +114,7 @@ pub fn setup_microtask(context: &mut JSContext) {
 pub fn setup_fetch(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     let scheduler_tx_clone = scheduler_tx;
@@ -182,7 +178,7 @@ pub fn setup_fetch(
 
             // Store resolve callback (we'll call it with Response or Error)
             {
-                let mut cbs = callbacks_clone.lock().unwrap();
+                let mut cbs = callbacks_clone.borrow_mut();
                 cbs.insert(callback_id, resolve_callback);
             }
 
@@ -254,7 +250,7 @@ pub fn setup_fetch(
 pub fn setup_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
     intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
@@ -283,7 +279,7 @@ pub fn setup_timer(
 fn setup_set_timeout(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     let callbacks_clone = callbacks;
@@ -320,7 +316,7 @@ fn setup_set_timeout(
 
             // Store the callback
             {
-                let mut cbs = callbacks_clone.lock().unwrap();
+                let mut cbs = callbacks_clone.borrow_mut();
                 cbs.insert(callback_id, callback);
             }
 
@@ -349,7 +345,7 @@ fn setup_set_timeout(
 fn setup_set_interval(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
     intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
@@ -388,7 +384,7 @@ fn setup_set_interval(
 
             // Store the callback
             {
-                let mut cbs = callbacks_clone.lock().unwrap();
+                let mut cbs = callbacks_clone.borrow_mut();
                 cbs.insert(callback_id, callback);
             }
 
@@ -424,7 +420,7 @@ fn setup_set_interval(
 fn setup_clear_timer(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
 ) {
     let scheduler_tx_clone = scheduler_tx.clone();
@@ -446,7 +442,7 @@ fn setup_clear_timer(
             };
 
             // Drop the stored callback, or else it leaks until worker teardown
-            callbacks_clone.lock().unwrap().remove(&timer_id);
+            callbacks_clone.borrow_mut().remove(&timer_id);
             intervals_clone.lock().unwrap().remove(&timer_id);
 
             // Send clear message
@@ -474,7 +470,7 @@ fn setup_clear_timer(
                 Err(_) => return Ok(JSValue::undefined(&ctx)),
             };
 
-            callbacks.lock().unwrap().remove(&timer_id);
+            callbacks.borrow_mut().remove(&timer_id);
             intervals.lock().unwrap().remove(&timer_id);
 
             // Send clear message
@@ -500,7 +496,7 @@ fn setup_clear_timer(
 pub fn setup_stream_ops(
     context: &mut JSContext,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
+    callbacks: CallbackMap,
     next_id: Arc<Mutex<CallbackId>>,
 ) {
     // Create __nativeStreamRead(stream_id, resolve_callback)
@@ -541,7 +537,7 @@ pub fn setup_stream_ops(
 
             // Store callback
             {
-                let mut cbs = callbacks_clone.lock().unwrap();
+                let mut cbs = callbacks_clone.borrow_mut();
                 cbs.insert(callback_id, callback);
             }
 
