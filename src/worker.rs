@@ -687,20 +687,9 @@ fn setup_env(
     context: &mut rusty_jsc::JSContext,
     env: &Option<std::collections::HashMap<String, String>>,
 ) {
-    let env_json = if let Some(env_map) = env {
-        let pairs: Vec<String> = env_map
-            .iter()
-            .map(|(k, v)| {
-                format!(
-                    "\"{}\": \"{}\"",
-                    k.replace('\\', "\\\\").replace('"', "\\\""),
-                    v.replace('\\', "\\\\").replace('"', "\\\"")
-                )
-            })
-            .collect();
-        format!("{{{}}}", pairs.join(", "))
-    } else {
-        "{}".to_string()
+    let env_json = match env {
+        Some(env_map) => serde_json::to_string(env_map).expect("env is a map of strings"),
+        None => "{}".to_string(),
     };
 
     let script = format!(
