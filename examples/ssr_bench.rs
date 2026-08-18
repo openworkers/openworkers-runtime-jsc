@@ -18,6 +18,7 @@ use std::time::Instant;
 
 const WARM_RENDERS: usize = 20;
 const COLD_CYCLES: usize = 10;
+const RESIDENT_WORKERS: usize = 8;
 
 /// Every route of the fixture site is prerendered, so this one is what the SSR pipeline serves
 const SSR_URL: &str = "http://localhost/ssr-bench";
@@ -274,7 +275,22 @@ async fn main() {
         drop(worker);
     }
 
-    let rss_peak = rss_kb();
+    let rss_before_resident = rss_kb();
+    let mut resident = Vec::with_capacity(RESIDENT_WORKERS);
+
+    for _ in 0..RESIDENT_WORKERS {
+        let mut worker = spawn_worker(&source).await.expect("worker should load");
+
+        if let Err(e) = render(&mut worker, SSR_URL).await {
+            fail(format!("resident render failed: {}", e));
+        }
+
+        resident.push(worker);
+    }
+
+    let rss_resident = rss_kb();
+
+    drop(resident);
 
     let (warm_min, warm_median) = min_median(warm);
     let (cold_min, cold_median) = min_median(cold);
@@ -298,12 +314,19 @@ async fn main() {
         cold_median,
     );
 
-    if let (Some(before), Some(warm), Some(peak)) = (rss_before, rss_warm, rss_peak) {
+    if let (Some(before), Some(warm)) = (rss_before, rss_warm) {
         println!(
-            "\nRSS: {} MB before load, {} MB warm, {} MB after cold cycles",
+            "\nRSS: {} MB at start, {} MB with one worker resident",
             before / 1024,
-            warm / 1024,
-            peak / 1024
+            warm / 1024
+        );
+    }
+
+    if let (Some(before), Some(resident)) = (rss_before_resident, rss_resident) {
+        println!(
+            "RSS per idle worker: {:.1} MB ({} resident)",
+            (resident.saturating_sub(before)) as f64 / 1024.0 / RESIDENT_WORKERS as f64,
+            RESIDENT_WORKERS
         );
     }
 }
