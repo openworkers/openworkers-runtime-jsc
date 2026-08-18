@@ -1,6 +1,8 @@
 // SSR benchmark: wake a worker, render a SvelteKit page, return HTML, sleep.
 //
 // To run: cargo run --release --example ssr_bench
+//
+// SSR_BUNDLE overrides the fixture, SSR_OUT writes the rendered page to a file.
 
 use openworkers_core::Event;
 use openworkers_core::HttpMethod;
@@ -96,7 +98,13 @@ fn report_console(worker: &mut Worker) {
     }
 }
 
-async fn render(worker: &mut Worker, url: &str) -> Result<(u16, Vec<u8>), String> {
+struct Rendered {
+    status: u16,
+    headers: Vec<(String, String)>,
+    body: Vec<u8>,
+}
+
+async fn render(worker: &mut Worker, url: &str) -> Result<Rendered, String> {
     let request = HttpRequest {
         method: HttpMethod::Get,
         url: url.to_string(),
@@ -114,7 +122,11 @@ async fn render(worker: &mut Worker, url: &str) -> Result<(u16, Vec<u8>), String
     let response = rx.await.map_err(|e| e.to_string())?;
     let body = response.body.collect().await.unwrap_or_default();
 
-    Ok((response.status, body.to_vec()))
+    Ok(Rendered {
+        status: response.status,
+        headers: response.headers,
+        body: body.to_vec(),
+    })
 }
 
 async fn spawn_worker(source: &str) -> Result<Worker, String> {
@@ -140,6 +152,15 @@ fn row(phase: &str, min: Duration, median: Duration) {
 fn fail(message: String) -> ! {
     println!("{}", message);
     std::process::exit(1);
+}
+
+/// Lets other runtimes be compared byte for byte on the same fixture
+fn sha256(body: &[u8]) -> String {
+    ring::digest::digest(&ring::digest::SHA256, body)
+        .as_ref()
+        .iter()
+        .map(|b| format!("{:02x}", b))
+        .collect()
 }
 
 #[tokio::main]
@@ -169,11 +190,11 @@ async fn main() {
     let create_time = create_start.elapsed();
 
     match render(&mut worker, PRERENDERED_URL).await {
-        Ok((status, body)) => println!(
+        Ok(response) => println!(
             "GET {} -> {} ({} bytes): prerendered route, answered by the ASSETS stub",
             PRERENDERED_URL,
-            status,
-            body.len()
+            response.status,
+            response.body.len()
         ),
         Err(e) => fail(format!("render of {} failed: {}", PRERENDERED_URL, e)),
     }
@@ -182,7 +203,7 @@ async fn main() {
     let first = render(&mut worker, SSR_URL).await;
     let first_time = first_start.elapsed();
 
-    let (status, body) = match first {
+    let first = match first {
         Ok(result) => result,
         Err(e) => {
             println!("first render failed: {}", e);
@@ -191,13 +212,28 @@ async fn main() {
         }
     };
 
-    let html = String::from_utf8_lossy(&body).to_string();
+    let html = String::from_utf8_lossy(&first.body).to_string();
 
-    println!("\nGET {} -> {} ({} bytes)", SSR_URL, status, body.len());
+    println!(
+        "\nGET {} -> {} ({} bytes)",
+        SSR_URL,
+        first.status,
+        first.body.len()
+    );
+
+    for (name, value) in &first.headers {
+        println!("  {}: {}", name, value);
+    }
+
+    println!("sha256: {}", sha256(&first.body));
     println!("first 200 chars:\n{}\n", &html[..html.len().min(200)]);
     report_console(&mut worker);
 
-    if !html.contains("<html") || body.len() < 1000 {
+    if let Ok(path) = std::env::var("SSR_OUT") {
+        std::fs::write(&path, &first.body).unwrap_or_else(|e| panic!("write {}: {}", path, e));
+    }
+
+    if !html.contains("<html") || first.body.len() < 1000 {
         fail("the response is not a server-rendered page".to_string());
     }
 
@@ -209,12 +245,12 @@ async fn main() {
         warm.push(start.elapsed());
 
         match result {
-            Ok((_, body)) if body.len() == html.len() => {}
-            Ok((status, body)) => fail(format!(
+            Ok(response) if response.body == first.body => {}
+            Ok(response) => fail(format!(
                 "warm render {} diverged: status {}, {} bytes",
                 i,
-                status,
-                body.len()
+                response.status,
+                response.body.len()
             )),
             Err(e) => fail(format!("warm render {} failed: {}", i, e)),
         }
