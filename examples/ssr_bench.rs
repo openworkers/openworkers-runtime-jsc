@@ -232,7 +232,8 @@ async fn main() {
     }
 
     println!("sha256: {}", sha256(&first.body));
-    println!("first 200 chars:\n{}\n", &html[..html.len().min(200)]);
+    let preview: String = html.chars().take(200).collect();
+    println!("first 200 chars:\n{}\n", preview);
     report_console(&mut worker);
 
     if let Ok(path) = std::env::var("SSR_OUT") {
