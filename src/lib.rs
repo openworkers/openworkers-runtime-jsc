@@ -1,5 +1,4 @@
 pub mod runtime;
-pub mod snapshot;
 mod worker;
 
 // Core API

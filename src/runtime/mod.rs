@@ -69,15 +69,11 @@ pub struct Runtime {
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     /// Stored callbacks (callback_id -> JSObject function) - shared with bindings
     pub(crate) callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
-    /// Next callback ID - shared with bindings
-    #[allow(dead_code)]
-    pub(crate) next_callback_id: Arc<Mutex<CallbackId>>,
     /// Track which callbacks are intervals (vs timeouts) - shared with bindings
     pub(crate) intervals: Arc<Mutex<std::collections::HashSet<CallbackId>>>,
     /// Sender for the in-flight event result (set during fetch/task execution)
     pub(crate) completion_tx: Arc<Mutex<Option<tokio::sync::oneshot::Sender<String>>>>,
     /// Stream manager for handling streaming responses
-    #[allow(dead_code)]
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
 }
 
@@ -162,7 +158,6 @@ impl Runtime {
             scheduler_tx,
             callback_rx,
             callbacks,
-            next_callback_id,
             intervals,
             completion_tx,
             stream_manager: stream_manager.clone(),
@@ -319,17 +314,11 @@ impl Runtime {
                     let headers_json =
                         serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
                     let response_script = format!(
-                        r#"(function() {{
-                                const stream = __createNativeStream({});
-                                const response = new Response(stream, {{
-                                    status: {},
-                                    statusText: "{}",
-                                    headers: {}
-                                }});
-                                // Mark as streaming response
-                                response._isStreaming = true;
-                                return response;
-                            }})()"#,
+                        r#"new Response(__createNativeStream({}), {{
+                                status: {},
+                                statusText: "{}",
+                                headers: {}
+                            }})"#,
                         stream_id, meta.status, meta.status_text, headers_json
                     );
 

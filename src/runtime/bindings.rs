@@ -5,13 +5,6 @@ use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 use tokio::sync::mpsc;
 
-/// Shared state for timer callbacks
-pub struct TimerState {
-    pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-    pub callbacks: Arc<Mutex<HashMap<CallbackId, JSObject>>>,
-    pub next_id: Arc<Mutex<CallbackId>>,
-}
-
 /// Setup console bindings (log, info, warn, error, debug)
 pub fn setup_console(context: &mut JSContext) {
     // Create native __console_log function that accepts level and message
@@ -179,11 +172,6 @@ pub fn setup_fetch(
                 .and_then(|v| v.to_object(&ctx).ok())
                 .ok_or_else(|| JSValue::string(&ctx, "Failed to get resolve callback"))?;
 
-            let _reject_callback = global
-                .get_property(&ctx, "__fetchReject")
-                .and_then(|v| v.to_object(&ctx).ok())
-                .ok_or_else(|| JSValue::string(&ctx, "Failed to get reject callback"))?;
-
             // Generate callback ID for resolve
             let callback_id = {
                 let mut next = next_id_clone.lock().unwrap();
@@ -196,7 +184,6 @@ pub fn setup_fetch(
             {
                 let mut cbs = callbacks_clone.lock().unwrap();
                 cbs.insert(callback_id, resolve_callback);
-                // For reject, we could store it separately, but for now we'll use the same callback
             }
 
             log::debug!(
