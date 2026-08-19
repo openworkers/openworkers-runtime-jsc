@@ -560,3 +560,42 @@ async fn test_get_random_values_fills_a_view_at_its_offset() {
     let body = response.body.collect().await.expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
+
+/// Test crypto.subtle.digest over a DataView
+#[tokio::test]
+async fn test_digest_of_a_data_view() {
+    let script = r#"
+        addEventListener('fetch', async (event) => {
+            const bytes = new TextEncoder().encode('..hello world..');
+            const view = new DataView(bytes.buffer, 2, 11);
+            const hash = await crypto.subtle.digest('SHA-256', view);
+
+            const hashHex = Array.from(new Uint8Array(hash))
+                .map(b => b.toString(16).padStart(2, '0'))
+                .join('');
+
+            const expected = 'b94d27b9934d3e08a52e52d7da7dabfac484efe37a5380ee9088f7ace2efcde9';
+
+            event.respondWith(new Response(hashHex === expected ? 'OK' : 'FAIL: ' + hashHex));
+        });
+    "#;
+
+    let script_obj = Script::new(script);
+    let mut worker = Worker::new(script_obj, None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
+}

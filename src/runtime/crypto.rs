@@ -448,20 +448,20 @@ pub fn setup_crypto(context: &mut JSContext) {
         const __cryptoKeys = new Map();
         let __nextKeyId = 1;
 
+        // Native reads any view directly, so nothing has to be copied here
+        const __bufferSource = (value, label) => {
+            if (value instanceof ArrayBuffer || ArrayBuffer.isView(value)) {
+                return value;
+            }
+
+            throw new TypeError(label + ' must be a BufferSource');
+        };
+
         // crypto.subtle.digest(algorithm, data) -> Promise<ArrayBuffer>
         crypto.subtle.digest = function(algorithm, data) {
             return new Promise((resolve, reject) => {
                 try {
-                    let bytes;
-                    if (data instanceof ArrayBuffer) {
-                        bytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        bytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
-
+                    const bytes = __bufferSource(data, 'Data');
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
                     const result = __nativeDigest(algoName, bytes);
 
@@ -529,15 +529,7 @@ pub fn setup_crypto(context: &mut JSContext) {
                 try {
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
-                    let keyBytes;
-                    if (keyData instanceof ArrayBuffer) {
-                        keyBytes = new Uint8Array(keyData);
-                    } else if (keyData instanceof Uint8Array) {
-                        keyBytes = keyData;
-                    } else {
-                        reject(new Error('Key data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const keyBytes = __bufferSource(keyData, 'Key data');
 
                     if (algoName === 'HMAC') {
                         if (format !== 'raw') {
@@ -634,15 +626,7 @@ pub fn setup_crypto(context: &mut JSContext) {
                 try {
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
-                    let dataBytes;
-                    if (data instanceof ArrayBuffer) {
-                        dataBytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        dataBytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const dataBytes = __bufferSource(data, 'Data');
 
                     if (!key.__keyData) {
                         reject(new Error('Invalid key'));
@@ -699,24 +683,8 @@ pub fn setup_crypto(context: &mut JSContext) {
                 try {
                     const algoName = typeof algorithm === 'string' ? algorithm : algorithm.name;
 
-                    let dataBytes, sigBytes;
-                    if (data instanceof ArrayBuffer) {
-                        dataBytes = new Uint8Array(data);
-                    } else if (data instanceof Uint8Array) {
-                        dataBytes = data;
-                    } else {
-                        reject(new Error('Data must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
-
-                    if (signature instanceof ArrayBuffer) {
-                        sigBytes = new Uint8Array(signature);
-                    } else if (signature instanceof Uint8Array) {
-                        sigBytes = signature;
-                    } else {
-                        reject(new Error('Signature must be ArrayBuffer or Uint8Array'));
-                        return;
-                    }
+                    const dataBytes = __bufferSource(data, 'Data');
+                    const sigBytes = __bufferSource(signature, 'Signature');
 
                     if (!key.__keyData) {
                         reject(new Error('Invalid key'));
