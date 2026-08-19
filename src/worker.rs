@@ -84,7 +84,7 @@ impl Worker {
         setup_env(&mut runtime.context, &script.env);
 
         // Setup console
-        crate::runtime::bindings::setup_console(&mut runtime.context);
+        crate::runtime::bindings::setup_console(&mut runtime.context, Some(ops.clone()));
 
         // Extract JavaScript code from WorkerCode
         let js_code = script.code.as_js().ok_or_else(|| {

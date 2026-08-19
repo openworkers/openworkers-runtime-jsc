@@ -145,10 +145,6 @@ pub enum CallbackMessage {
     ExecuteTimeout(CallbackId),
     /// Execute an interval callback (repeating)
     ExecuteInterval(CallbackId),
-    /// Execute a Promise resolve callback with string result
-    ExecutePromiseResolve(CallbackId, String),
-    /// Execute a Promise reject callback with error
-    ExecutePromiseReject(CallbackId, String),
     /// Reject a fetch Promise with error
     FetchError(CallbackId, String),
     /// Fetch streaming success: metadata + stream ID
@@ -252,12 +248,6 @@ impl Runtime {
             CallbackMessage::ExecuteInterval(callback_id) => {
                 // Intervals stay registered until they are cleared
                 self.call_registry("__runRepeatingCallback", callback_id, &[])
-            }
-            CallbackMessage::ExecutePromiseResolve(callback_id, result)
-            | CallbackMessage::ExecutePromiseReject(callback_id, result) => {
-                let value = JSValue::string(&self.context, result.as_str());
-
-                self.run_callback(callback_id, &[value]);
             }
             CallbackMessage::FetchError(callback_id, message) => {
                 match self.make_network_error(&message) {

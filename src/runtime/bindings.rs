@@ -1,4 +1,5 @@
 use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
+use openworkers_core::{LogLevel, OperationsHandle};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
 use std::cell::Cell;
@@ -98,7 +99,9 @@ fn drop_callback(context: &JSContext, callback_id: CallbackId) {
 }
 
 /// Setup console bindings (log, info, warn, error, debug)
-pub fn setup_console(context: &mut JSContext) {
+///
+/// Without an ops handle the messages go to stdout, which no runner reads.
+pub fn setup_console(context: &mut JSContext, ops: Option<OperationsHandle>) {
     // Create native __console_log function that accepts level and message
     let console_log_fn = rusty_jsc::callback_closure!(
         context,
@@ -113,13 +116,19 @@ pub fn setup_console(context: &mut JSContext) {
                 .map(|s| s.to_string())
                 .unwrap_or_default();
 
-            // Print to stdout
-            let prefix = match level_num {
-                0 => "[ERROR]",
-                1 => "[WARN]",
-                _ => "[LOG]",
+            let level = match level_num {
+                0 => LogLevel::Error,
+                1 => LogLevel::Warn,
+                3 => LogLevel::Debug,
+                _ => LogLevel::Info,
             };
-            println!("{} {}", prefix, msg);
+
+            // Called straight from JS, or else a script that never yields to the
+            // event loop would end before its logs were delivered
+            match &ops {
+                Some(ops) => ops.handle_log(level, msg),
+                None => println!("[{}] {}", level, msg),
+            }
 
             Ok(JSValue::undefined(&ctx))
         }
@@ -152,7 +161,7 @@ pub fn setup_console(context: &mut JSContext) {
             },
             debug: function(...args) {
                 const msg = args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ');
-                __console_log(2, msg);
+                __console_log(3, msg);
             }
         };
     "#;
