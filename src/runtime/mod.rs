@@ -2,6 +2,7 @@ mod base64;
 pub mod bindings;
 mod crypto;
 pub mod fetch;
+mod form_data;
 mod headers;
 mod request;
 mod response;
@@ -177,6 +178,9 @@ impl Runtime {
 
         // Setup Headers (before Response)
         headers::setup_headers(&mut context);
+
+        // Setup FormData (used by Request/Response body decoding)
+        form_data::setup_form_data(&mut context);
 
         // Setup Response (uses ReadableStream and Headers)
         response::setup_response(&mut context);

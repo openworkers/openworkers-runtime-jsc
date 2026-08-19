@@ -103,6 +103,11 @@ pub const REQUEST_JS: &str = r#"
             return JSON.parse(text);
         }
 
+        async formData() {
+            const text = await this.text();
+            return __parseFormData(text, this.headers.get('content-type'));
+        }
+
         async arrayBuffer() {
             if (this.bodyUsed) {
                 throw new TypeError('Body has already been consumed');

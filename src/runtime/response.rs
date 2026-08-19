@@ -172,6 +172,11 @@ pub fn setup_response(context: &mut JSContext) {
                 return JSON.parse(text);
             }
 
+            async formData() {
+                const text = await this.text();
+                return __parseFormData(text, this.headers.get('content-type'));
+            }
+
             // Internal method to synchronously get raw body bytes
             // Used by the Rust runtime to extract response body
             _getRawBody() {
