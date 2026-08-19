@@ -105,3 +105,17 @@ async fn test_string_body_is_sent_as_utf8() {
 
     assert_eq!(sent_body(script).await, "h\u{e9}llo".as_bytes());
 }
+
+#[tokio::test]
+async fn test_data_view_body_is_sent_from_its_offset() {
+    let script = r#"
+        const buffer = new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]).buffer;
+
+        fetch('https://example.com/post', {
+            method: 'POST',
+            body: new DataView(buffer, 2, 3)
+        });
+    "#;
+
+    assert_eq!(sent_body(script).await, vec![3, 4, 5]);
+}

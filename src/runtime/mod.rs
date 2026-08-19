@@ -44,7 +44,7 @@ pub(crate) fn typed_array_bytes(context: &JSContext, value: &JSValue) -> Option<
     };
 
     if kind == private::JSTypedArrayType_kJSTypedArrayTypeNone {
-        return None;
+        return data_view_bytes(context, value);
     }
 
     let object = value.to_object(context).ok()?;
@@ -78,6 +78,29 @@ pub(crate) fn typed_array_bytes(context: &JSContext, value: &JSValue) -> Option<
     };
 
     Some(bytes::Bytes::copy_from_slice(bytes))
+}
+
+/// JSC reports no typed array type for a DataView, so read it through its own
+/// properties; anything else lacks them and falls out as None
+fn data_view_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes> {
+    let view = value.to_object(context).ok()?;
+    let buffer = view
+        .get_property(context, "buffer")?
+        .to_object(context)
+        .ok()?;
+    let offset = view
+        .get_property(context, "byteOffset")?
+        .to_number(context)
+        .ok()? as usize;
+    let length = view
+        .get_property(context, "byteLength")?
+        .to_number(context)
+        .ok()? as usize;
+
+    let bytes = buffer.get_array_buffer(context).ok()?;
+    let end = offset.checked_add(length)?;
+
+    bytes.get(offset..end).map(bytes::Bytes::copy_from_slice)
 }
 
 /// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`
