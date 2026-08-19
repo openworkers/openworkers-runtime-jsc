@@ -231,11 +231,19 @@ impl Runtime {
                 self.call_registry("__runRepeatingCallback", callback_id, &[])
             }
             CallbackMessage::ExecutePromiseResolve(callback_id, result)
-            | CallbackMessage::ExecutePromiseReject(callback_id, result)
-            | CallbackMessage::FetchError(callback_id, result) => {
+            | CallbackMessage::ExecutePromiseReject(callback_id, result) => {
                 let value = JSValue::string(&self.context, result.as_str());
 
                 self.run_callback(callback_id, &[value]);
+            }
+            CallbackMessage::FetchError(callback_id, message) => {
+                match self.make_network_error(&message) {
+                    Ok(error) => self.run_callback(callback_id, &[error]),
+                    Err(e) => log::error!(
+                        "Failed to create fetch error: {}",
+                        error_text(&self.context, &e)
+                    ),
+                }
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
                 match self.make_response(&meta, stream_id) {
@@ -303,6 +311,14 @@ impl Runtime {
         );
 
         self.context.evaluate_script(&script, 1)
+    }
+
+    /// fetch() rejects with a TypeError on a network error
+    fn make_network_error(&mut self, message: &str) -> Result<JSValue, JSValue> {
+        let message_json = serde_json::to_string(message).expect("a string serializes");
+
+        self.context
+            .evaluate_script(&format!("new TypeError({})", message_json), 1)
     }
 
     fn make_chunk_result(

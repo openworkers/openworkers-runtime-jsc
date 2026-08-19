@@ -238,11 +238,12 @@ pub fn setup_fetch(
                 Err(e) => return Err(JSValue::string(&ctx, e.as_str())),
             };
 
-            // Create a Promise and store resolve/reject callbacks
+            // One callback settles the Promise, and a network error arrives as
+            // an Error, which has to reject rather than resolve
             let promise_script = r#"
                 new Promise((resolve, reject) => {
-                    globalThis.__fetchResolve = resolve;
-                    globalThis.__fetchReject = reject;
+                    globalThis.__fetchSettle = (value) =>
+                        value instanceof Error ? reject(value) : resolve(value);
                 })
             "#;
 
@@ -251,18 +252,15 @@ pub fn setup_fetch(
                 Err(_) => return Err(JSValue::string(&ctx, "Failed to create Promise")),
             };
 
-            // Get resolve and reject callbacks
-            let global = ctx.get_global_object();
-
-            let resolve_callback = global
-                .get_property(&ctx, "__fetchResolve")
+            let settle_callback = ctx
+                .get_global_object()
+                .get_property(&ctx, "__fetchSettle")
                 .and_then(|v| v.to_object(&ctx).ok())
-                .ok_or_else(|| JSValue::string(&ctx, "Failed to get resolve callback"))?;
+                .ok_or_else(|| JSValue::string(&ctx, "Failed to get settle callback"))?;
 
             let callback_id = next_callback_id(&next_id_clone);
 
-            // Store resolve callback (we'll call it with Response or Error)
-            store_callback(&ctx, callback_id, resolve_callback)?;
+            store_callback(&ctx, callback_id, settle_callback)?;
 
             log::debug!(
                 "fetch: scheduled streaming {} {} (promise_id: {})",

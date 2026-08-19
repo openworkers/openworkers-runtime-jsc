@@ -24,6 +24,10 @@ impl OperationsHandler for MockOps {
                 });
             }
 
+            if url.contains("/unreachable") {
+                return Err("connection refused".to_string());
+            }
+
             if url.contains("/json") {
                 return Ok(HttpResponse {
                     status: 200,
@@ -397,6 +401,36 @@ async fn test_response_headers_api() {
         }
         Err(_) => panic!("Failed to check headers API result"),
     }
+
+    runner.shutdown().await;
+}
+
+#[tokio::test]
+async fn test_fetch_rejects_on_a_network_error() {
+    let mut runner = TestRunner::new_with_ops(ops());
+
+    let script = r#"
+        globalThis.outcome = 'pending';
+
+        fetch('https://echo.workers.rocks/unreachable')
+            .then(() => { globalThis.outcome = 'resolved'; })
+            .catch(error => {
+                globalThis.outcome = `${error.constructor.name}: ${error.message}`;
+            });
+    "#;
+
+    runner.execute(script).expect("fetch should execute");
+    runner.process_for(Duration::from_secs(3)).await;
+
+    let outcome = runner
+        .runtime
+        .evaluate("globalThis.outcome")
+        .expect("Failed to check outcome")
+        .to_js_string(&runner.runtime.context)
+        .expect("outcome should be a string")
+        .to_string();
+
+    assert_eq!(outcome, "TypeError: connection refused");
 
     runner.shutdown().await;
 }
