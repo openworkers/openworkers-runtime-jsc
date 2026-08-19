@@ -5,21 +5,15 @@ pub fn setup_headers(context: &mut JSContext) {
     let code = r#"
         globalThis.Headers = class Headers {
             constructor(init) {
-                this._map = new Map();
+                // A list, not a map: Set-Cookie holds one entry per cookie
+                this._entries = [];
 
                 if (init) {
-                    if (init instanceof Headers) {
-                        // Copy from another Headers object
-                        for (const [key, value] of init) {
-                            this._map.set(key, value);
-                        }
-                    } else if (Array.isArray(init)) {
-                        // Array of [key, value] pairs
+                    if (init instanceof Headers || Array.isArray(init)) {
                         for (const [key, value] of init) {
                             this.append(key, value);
                         }
                     } else if (typeof init === 'object') {
-                        // Plain object
                         for (const key of Object.keys(init)) {
                             this.append(key, init[key]);
                         }
@@ -27,74 +21,93 @@ pub fn setup_headers(context: &mut JSContext) {
                 }
             }
 
-            // Normalize header name (lowercase)
             _normalizeKey(name) {
                 return String(name).toLowerCase();
             }
 
             append(name, value) {
                 const key = this._normalizeKey(name);
-                const strValue = String(value);
-                if (this._map.has(key)) {
-                    this._map.set(key, this._map.get(key) + ', ' + strValue);
+                const text = String(value);
+                const existing = key === 'set-cookie'
+                    ? undefined
+                    : this._entries.find(([n]) => n === key);
+
+                if (existing) {
+                    existing[1] += ', ' + text;
                 } else {
-                    this._map.set(key, strValue);
+                    this._entries.push([key, text]);
                 }
             }
 
             delete(name) {
-                this._map.delete(this._normalizeKey(name));
+                const key = this._normalizeKey(name);
+
+                this._entries = this._entries.filter(([n]) => n !== key);
             }
 
             get(name) {
-                const value = this._map.get(this._normalizeKey(name));
-                return value !== undefined ? value : null;
+                const key = this._normalizeKey(name);
+                const values = this._entries.filter(([n]) => n === key).map(([, v]) => v);
+
+                return values.length === 0 ? null : values.join(', ');
             }
 
             has(name) {
-                return this._map.has(this._normalizeKey(name));
+                const key = this._normalizeKey(name);
+
+                return this._entries.some(([n]) => n === key);
             }
 
+            // Replaces in place so the header keeps its emission slot
             set(name, value) {
-                this._map.set(this._normalizeKey(name), String(value));
+                const key = this._normalizeKey(name);
+                const index = this._entries.findIndex(([n]) => n === key);
+
+                if (index === -1) {
+                    this._entries.push([key, String(value)]);
+                    return;
+                }
+
+                this._entries[index] = [key, String(value)];
+                this._entries = this._entries.filter(([n], i) => n !== key || i === index);
             }
 
-            // Iteration methods
             *entries() {
-                yield* this._map.entries();
+                for (const [key, value] of this._entries) {
+                    yield [key, value];
+                }
             }
 
             *keys() {
-                yield* this._map.keys();
+                for (const [key] of this._entries) {
+                    yield key;
+                }
             }
 
             *values() {
-                yield* this._map.values();
+                for (const [, value] of this._entries) {
+                    yield value;
+                }
             }
 
             forEach(callback, thisArg) {
-                for (const [key, value] of this._map) {
+                for (const [key, value] of this._entries) {
                     callback.call(thisArg, value, key, this);
                 }
             }
 
-            // Make Headers iterable
             [Symbol.iterator]() {
                 return this.entries();
             }
 
-            // getSetCookie returns all Set-Cookie headers as array
             getSetCookie() {
-                const cookies = [];
-                const value = this._map.get('set-cookie');
-                if (value) {
-                    cookies.push(value);
-                }
-                return cookies;
+                return this._entries
+                    .filter(([key]) => key === 'set-cookie')
+                    .map(([, value]) => value);
             }
         };
 
-        // Native code enumerates own properties, which on a Headers yields its backing Map
+        // Native code enumerates own properties, which on a Headers yields its backing list
         globalThis.__normalizeHeaders = function(init) {
             const plain = {};
 

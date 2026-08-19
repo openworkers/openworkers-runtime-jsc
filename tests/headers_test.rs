@@ -277,3 +277,79 @@ async fn test_headers_clone_from_headers() {
     let body = response.body.collect().await.expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
+
+async fn response_headers(script: &str) -> Vec<(String, String)> {
+    let mut worker = Worker::new(Script::new(script), None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    rx.await.expect("Should receive response").headers
+}
+
+#[tokio::test]
+async fn test_set_cookie_stays_one_header_per_cookie() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const headers = new Headers();
+            headers.append('Set-Cookie', 'a=1; Path=/');
+            headers.append('Content-Type', 'text/plain');
+            headers.append('Set-Cookie', 'b=2; Path=/items');
+
+            event.respondWith(new Response('', { headers }));
+        });
+    "#;
+
+    let headers = response_headers(script).await;
+
+    assert_eq!(
+        headers,
+        vec![
+            ("set-cookie".to_string(), "a=1; Path=/".to_string()),
+            ("content-type".to_string(), "text/plain".to_string()),
+            ("set-cookie".to_string(), "b=2; Path=/items".to_string()),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn test_get_set_cookie_lists_every_cookie() {
+    let script = r#"
+        addEventListener('fetch', (event) => {
+            const headers = new Headers();
+            headers.append('Set-Cookie', 'a=1');
+            headers.append('Set-Cookie', 'b=2');
+
+            const result = JSON.stringify(headers.getSetCookie()) === '["a=1","b=2"]' &&
+                           headers.get('set-cookie') === 'a=1, b=2' ? 'OK' : 'FAIL';
+            event.respondWith(new Response(result));
+        });
+    "#;
+
+    let mut worker = Worker::new(Script::new(script), None)
+        .await
+        .expect("Worker should initialize");
+
+    let request = HttpRequest {
+        method: HttpMethod::Get,
+        url: "https://example.com/".to_string(),
+        headers: HashMap::new(),
+        body: RequestBody::None,
+    };
+
+    let (task, rx) = Event::fetch(request);
+    worker.exec(task).await.expect("Task should execute");
+
+    let response = rx.await.expect("Should receive response");
+    let body = response.body.collect().await.expect("Should have body");
+    assert_eq!(String::from_utf8_lossy(&body), "OK");
+}
