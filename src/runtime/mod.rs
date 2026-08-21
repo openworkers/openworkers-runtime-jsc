@@ -395,6 +395,9 @@ pub async fn run_event_loop(
                     let _ = callback_tx.send(CallbackMessage::ExecuteTimeout(callback_id));
                 });
 
+                // A timeout that fires is never cleared, so its handle would sit
+                // here for the whole life of the worker
+                running_tasks.retain(|_, handle| !handle.is_finished());
                 running_tasks.insert(callback_id, handle);
             }
             SchedulerMessage::ScheduleInterval(callback_id, interval_ms) => {
