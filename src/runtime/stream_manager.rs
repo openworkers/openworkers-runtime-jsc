@@ -20,6 +20,15 @@ pub enum StreamChunk {
     Error(String),
 }
 
+/// Why a non-blocking write did not go through
+#[derive(Debug, PartialEq, Eq)]
+pub enum TryWriteError {
+    /// The buffer is full, so the write is worth retrying once the reader drains it
+    Full,
+    /// The stream is gone: cancelled, finished, or never created
+    Closed,
+}
+
 /// Manages all active streams and their communication channels
 /// Stores both senders (for writing) and receivers (for reading) internally
 /// Uses bounded channels for backpressure support
@@ -88,21 +97,32 @@ impl StreamManager {
         }
     }
 
-    /// Try to write a chunk without waiting (returns error if buffer is full)
+    /// Try to write a chunk without waiting
     /// Useful for non-async contexts
-    pub fn try_write_chunk(&self, stream_id: StreamId, chunk: StreamChunk) -> Result<(), String> {
+    pub fn try_write_chunk(
+        &self,
+        stream_id: StreamId,
+        chunk: StreamChunk,
+    ) -> Result<(), TryWriteError> {
         let senders = self.senders.lock().unwrap();
 
-        if let Some(tx) = senders.get(&stream_id) {
-            tx.try_send(chunk).map_err(|e| match e {
-                mpsc::error::TrySendError::Full(_) => {
-                    "Stream buffer full (backpressure)".to_string()
-                }
-                mpsc::error::TrySendError::Closed(_) => "Stream channel closed".to_string(),
-            })
-        } else {
-            Err(format!("Stream {} not found", stream_id))
-        }
+        let Some(tx) = senders.get(&stream_id) else {
+            return Err(TryWriteError::Closed);
+        };
+
+        tx.try_send(chunk).map_err(|e| match e {
+            mpsc::error::TrySendError::Full(_) => TryWriteError::Full,
+            mpsc::error::TrySendError::Closed(_) => TryWriteError::Closed,
+        })
+    }
+
+    /// Drop the writing end, so a reader sees the end of the stream once it has
+    /// taken what is already buffered
+    ///
+    /// Unlike `close_stream` this keeps the receiver, which the response head may
+    /// not have claimed yet.
+    pub fn finish_stream(&self, stream_id: StreamId) {
+        self.senders.lock().unwrap().remove(&stream_id);
     }
 
     /// Read the next chunk from a stream (async, called from scheduler)
@@ -254,8 +274,7 @@ mod tests {
 
         // try_write should fail when buffer is full
         let result = manager.try_write_chunk(id, StreamChunk::Data(Bytes::from("3")));
-        assert!(result.is_err());
-        assert!(result.unwrap_err().contains("backpressure"));
+        assert_eq!(result, Err(TryWriteError::Full));
 
         // Read one to free space
         let _ = manager.read_chunk(id).await.unwrap();

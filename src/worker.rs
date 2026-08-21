@@ -133,6 +133,10 @@ impl Worker {
     }
 
     /// Execute an event and return termination reason (openworkers-core compatible)
+    ///
+    /// A `ResponseBody::Stream` has to be read while this future is polled: the
+    /// guest produces its body from here, and stops once `stream_buffer_size`
+    /// chunks are waiting for a reader.
     pub async fn exec(&mut self, mut event: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
@@ -196,6 +200,9 @@ impl Worker {
             ));
         }
 
+        // One budget covers the handler and the response body it leaves behind
+        let deadline = self.deadline();
+
         let request_obj = self.make_request_object(&fetch_init.req).map_err(|_| {
             TerminationReason::Exception("Failed to create Request object".to_string())
         })?;
@@ -247,7 +254,7 @@ impl Worker {
             return Err(TerminationReason::Exception(error_msg));
         }
 
-        let json_str = self.wait_for_completion(done_rx).await?;
+        let json_str = self.wait_for_completion(done_rx, deadline).await?;
 
         // Parse the extracted metadata
         #[derive(serde::Deserialize)]
@@ -263,38 +270,20 @@ impl Worker {
         })?;
 
         // Every response body is streamed, so no stream means no body
-        let stream = extracted
-            .response_stream_id
-            .and_then(|stream_id| self.runtime.stream_manager.take_receiver(stream_id));
+        let stream = extracted.response_stream_id.and_then(|stream_id| {
+            self.runtime
+                .stream_manager
+                .take_receiver(stream_id)
+                .map(|rx| (stream_id, rx))
+        });
 
-        let body = match stream {
-            None => ResponseBody::None,
-            Some(mut rx) => {
-                // Create bounded channel for HttpBody
-                const RESPONSE_STREAM_BUFFER_SIZE: usize = 16;
-                let (tx, response_rx) = tokio::sync::mpsc::channel(RESPONSE_STREAM_BUFFER_SIZE);
+        let (body, pending) = match stream {
+            None => (ResponseBody::None, None),
+            Some((stream_id, rx)) => {
+                let (tx, response_rx) =
+                    tokio::sync::mpsc::channel(self.limits.stream_buffer_size.max(1));
 
-                // Spawn task to forward from StreamChunk to Result<Bytes, String>
-                tokio::spawn(async move {
-                    while let Some(chunk) = rx.recv().await {
-                        match chunk {
-                            StreamChunk::Data(bytes) => {
-                                if tx.send(Ok(bytes)).await.is_err() {
-                                    break;
-                                }
-                            }
-                            StreamChunk::Done => {
-                                break;
-                            }
-                            StreamChunk::Error(e) => {
-                                let _ = tx.send(Err(e)).await;
-                                break;
-                            }
-                        }
-                    }
-                });
-
-                ResponseBody::Stream(response_rx)
+                (ResponseBody::Stream(response_rx), Some((stream_id, rx, tx)))
             }
         };
 
@@ -305,12 +294,71 @@ impl Worker {
             body,
         });
 
+        if let Some((stream_id, rx, tx)) = pending {
+            let pumped = self.pump_response_body(rx, tx, deadline).await;
+
+            // Whatever ended the stream, the guest has no reader left to write to
+            self.runtime.stream_manager.close_stream(stream_id);
+
+            pumped?;
+        }
+
         // Return response for exec_http (body already sent via channel)
         Ok(HttpResponse {
             status: extracted.status,
             headers: extracted.headers,
             body: ResponseBody::None,
         })
+    }
+
+    /// Forward a response body to the host, driving JS for as long as the guest
+    /// still has chunks to produce
+    ///
+    /// A stream that paces itself has nobody left to finish it once `exec` returns
+    /// at the response head, so the host waits out its own deadline for a channel
+    /// nobody closes.
+    async fn pump_response_body(
+        &mut self,
+        mut rx: tokio::sync::mpsc::Receiver<StreamChunk>,
+        tx: tokio::sync::mpsc::Sender<Result<bytes::Bytes, String>>,
+        deadline: Option<tokio::time::Instant>,
+    ) -> Result<(), TerminationReason> {
+        loop {
+            let bytes = tokio::select! {
+                biased;
+
+                chunk = rx.recv() => match chunk {
+                    Some(StreamChunk::Data(bytes)) => bytes,
+                    // Done, or a writer that dropped without saying so
+                    Some(StreamChunk::Done) | None => return Ok(()),
+                    Some(StreamChunk::Error(e)) => {
+                        let _ = tx.send(Err(e)).await;
+
+                        return Ok(());
+                    }
+                },
+                msg = self.runtime.callback_rx.recv() => {
+                    match msg {
+                        Some(msg) => self.runtime.handle_callback(msg),
+                        None => return Err(TerminationReason::Other(
+                            "Event loop stopped".to_string(),
+                        )),
+                    }
+
+                    continue;
+                }
+                _ = at_deadline(deadline) => return Err(TerminationReason::WallClockTimeout),
+            };
+
+            tokio::select! {
+                // The host walking away ends the stream, and the guest finds out
+                // when its next write hits a closed channel
+                sent = tx.send(Ok(bytes)) => if sent.is_err() {
+                    return Ok(());
+                },
+                _ = at_deadline(deadline) => return Err(TerminationReason::WallClockTimeout),
+            }
+        }
     }
 
     async fn trigger_task_event(&mut self, task_init: TaskInit) -> Result<(), TerminationReason> {
@@ -352,6 +400,7 @@ impl Worker {
 
         // The handler reports the task result via the native __completeEvent
         let (epoch, done_rx) = self.completion.borrow_mut().arm();
+        let deadline = self.deadline();
 
         // Try __taskHandler first, then fallback to __triggerScheduled for backward compat
         let trigger_script = r#"
@@ -397,7 +446,7 @@ impl Worker {
             return Err(TerminationReason::Exception(error_msg));
         }
 
-        let json_str = self.wait_for_completion(done_rx).await?;
+        let json_str = self.wait_for_completion(done_rx, deadline).await?;
 
         #[derive(serde::Deserialize)]
         struct ExtractedResult {
@@ -457,24 +506,21 @@ impl Worker {
         build_request.call_as_function(&self.runtime.context, None, &[method, url, headers, body])
     }
 
+    /// The instant the wall-clock budget runs out, or None when there is none
+    fn deadline(&self) -> Option<tokio::time::Instant> {
+        match self.limits.max_wall_clock_time_ms {
+            0 => None,
+            ms => Some(tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms)),
+        }
+    }
+
     /// Drive JS callbacks until the event completes, honoring the wall-clock limit
     async fn wait_for_completion(
         &mut self,
         mut done_rx: tokio::sync::oneshot::Receiver<String>,
+        deadline: Option<tokio::time::Instant>,
     ) -> Result<String, TerminationReason> {
-        let deadline = match self.limits.max_wall_clock_time_ms {
-            0 => None,
-            ms => Some(tokio::time::Instant::now() + tokio::time::Duration::from_millis(ms)),
-        };
-
         loop {
-            let timeout = async {
-                match deadline {
-                    Some(at) => tokio::time::sleep_until(at).await,
-                    None => std::future::pending().await,
-                }
-            };
-
             tokio::select! {
                 result = &mut done_rx => {
                     return result.map_err(|_| {
@@ -491,11 +537,19 @@ impl Worker {
                         }
                     }
                 }
-                _ = timeout => {
+                _ = at_deadline(deadline) => {
                     return Err(TerminationReason::WallClockTimeout);
                 }
             }
         }
+    }
+}
+
+/// Completes when the wall-clock budget runs out, and never without one
+async fn at_deadline(deadline: Option<tokio::time::Instant>) {
+    match deadline {
+        Some(at) => tokio::time::sleep_until(at).await,
+        None => std::future::pending().await,
     }
 }
 
@@ -536,6 +590,11 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
         .unwrap();
 
     let add_event_listener_script = r#"
+        // Hand control back to the event loop, so the host can drain what it has
+        globalThis.__yieldToHost = function() {
+            return new Promise(resolve => setTimeout(resolve, 0));
+        };
+
         // Stream all response bodies to Rust
         globalThis.__streamResponseBody = async function(response) {
             if (!response || !response.body) {
@@ -560,17 +619,24 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
                     while (true) {
                         const { done, value } = await reader.read();
                         if (done) {
-                            __responseStreamEnd(streamId);
                             break;
                         }
                         if (value) {
-                            __responseStreamWrite(streamId, value);
+                            // A full buffer is the host being slow, not a lost chunk
+                            while (!__responseStreamWrite(streamId, value)) {
+                                await __yieldToHost();
+                            }
                         }
                     }
                 } catch (e) {
-                    console.error('[__streamResponseBody] Error:', e);
-                    __responseStreamEnd(streamId);
+                    // A guest that gives up mid-stream must not read as a whole body
+                    const message = String((e && e.message) || e);
+                    while (!__responseStreamError(streamId, message)) {
+                        await __yieldToHost();
+                    }
                 }
+
+                __responseStreamEnd(streamId);
             })();
 
             return response;

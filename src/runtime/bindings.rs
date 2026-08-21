@@ -1,4 +1,6 @@
-use super::{CallbackId, SchedulerMessage, stream_manager::StreamId};
+use super::stream_manager::StreamId;
+use super::stream_manager::TryWriteError;
+use super::{CallbackId, SchedulerMessage};
 use openworkers_core::{LogLevel, OperationsHandle};
 use rusty_jsc::{JSContext, JSObject, JSValue};
 use rusty_jsc_macros::callback;
@@ -663,7 +665,8 @@ pub fn setup_stream_ops(
 
 /// Setup response stream operations for streaming all responses
 /// __responseStreamCreate() - creates a stream for response body, returns stream ID
-/// __responseStreamWrite(stream_id, Uint8Array) - writes bytes to the stream
+/// __responseStreamWrite(stream_id, Uint8Array) - writes bytes, false when the buffer is full
+/// __responseStreamError(stream_id, message) - hands the reader an error, false when full
 /// __responseStreamEnd(stream_id) - signals end of stream
 pub fn setup_response_stream_ops(
     context: &mut JSContext,
@@ -703,15 +706,50 @@ pub fn setup_response_stream_ops(
                 None => return Err(JSValue::string(&ctx, "data must be a Uint8Array")),
             };
 
-            // Try to write the chunk (non-blocking)
+            // A full buffer is the reader being slow, which the caller can wait out;
+            // a closed one has nobody left to write to
             match manager_clone
                 .try_write_chunk(stream_id, super::stream_manager::StreamChunk::Data(bytes))
             {
                 Ok(()) => Ok(JSValue::boolean(&ctx, true)),
-                Err(e) => {
-                    log::warn!("__responseStreamWrite error: {}", e);
-                    Ok(JSValue::boolean(&ctx, false))
-                }
+                Err(TryWriteError::Full) => Ok(JSValue::boolean(&ctx, false)),
+                Err(TryWriteError::Closed) => Err(JSValue::string(
+                    &ctx,
+                    format!("response stream {} is closed", stream_id),
+                )),
+            }
+        }
+    );
+
+    // __responseStreamError(stream_id, message) -> boolean
+    let manager_clone = stream_manager.clone();
+    let error_stream = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 2 {
+                return Err(JSValue::string(
+                    &ctx,
+                    "__responseStreamError requires stream_id and message",
+                ));
+            }
+
+            let stream_id = match args[0].to_number(&ctx) {
+                Ok(id) => id as StreamId,
+                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
+            };
+
+            let message = args[1]
+                .to_js_string(&ctx)
+                .map(|s| s.to_string())
+                .unwrap_or_else(|_| "the guest errored its response stream".to_string());
+
+            // A stream nobody reads any more has nobody to tell, so that counts as told
+            match manager_clone.try_write_chunk(
+                stream_id,
+                super::stream_manager::StreamChunk::Error(message),
+            ) {
+                Ok(()) | Err(TryWriteError::Closed) => Ok(JSValue::boolean(&ctx, true)),
+                Err(TryWriteError::Full) => Ok(JSValue::boolean(&ctx, false)),
             }
         }
     );
@@ -733,9 +771,9 @@ pub fn setup_response_stream_ops(
                 Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
             };
 
-            // Send Done signal
-            let _ =
-                manager_clone.try_write_chunk(stream_id, super::stream_manager::StreamChunk::Done);
+            // Dropping the writer ends the stream whether or not the buffer has room,
+            // and a Done chunk would need a free slot to say the same thing
+            manager_clone.finish_stream(stream_id);
 
             log::debug!("__responseStreamEnd: ended stream {}", stream_id);
             Ok(JSValue::undefined(&ctx))
@@ -749,6 +787,9 @@ pub fn setup_response_stream_ops(
         .unwrap();
     global
         .set_property(context, "__responseStreamWrite", write_stream.into())
+        .unwrap();
+    global
+        .set_property(context, "__responseStreamError", error_stream.into())
         .unwrap();
     global
         .set_property(context, "__responseStreamEnd", end_stream.into())
