@@ -186,6 +186,16 @@ impl Worker {
         &mut self,
         fetch_init: openworkers_core::FetchInit,
     ) -> Result<HttpResponse, TerminationReason> {
+        // Nothing here feeds a host channel into a guest Request, and a body that
+        // silently arrives empty costs the caller its whole wall-clock budget
+        if let RequestBody::Stream(_) = fetch_init.req.body {
+            return Err(TerminationReason::Other(
+                "Streaming request bodies are not supported: collect the body into \
+                 RequestBody::Bytes before calling exec"
+                    .to_string(),
+            ));
+        }
+
         let request_obj = self.make_request_object(&fetch_init.req).map_err(|_| {
             TerminationReason::Exception("Failed to create Request object".to_string())
         })?;
