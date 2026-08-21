@@ -42,7 +42,12 @@ async fn test_text_encoder_basic() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -77,7 +82,12 @@ async fn test_text_decoder_basic() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -117,7 +127,12 @@ async fn test_text_encoder_emoji() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -170,6 +185,11 @@ async fn test_text_encoder_roundtrip() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }

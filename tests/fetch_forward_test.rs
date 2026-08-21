@@ -143,7 +143,12 @@ async fn test_fetch_with_headers_instance() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Channel should not close");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let echoed: serde_json::Value =
         serde_json::from_slice(&body).expect("Mock should echo the request");
 
@@ -182,7 +187,12 @@ async fn test_fetch_with_request_input() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Channel should not close");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let echoed: serde_json::Value =
         serde_json::from_slice(&body).expect("Mock should echo the request");
 
@@ -224,7 +234,12 @@ async fn test_fetch_binary_roundtrip() {
 
     assert_eq!(response.status, 200);
 
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let expected: Vec<u8> = (0u8..=255).collect();
 
     assert_eq!(&body[..], &expected[..]);

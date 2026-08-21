@@ -18,7 +18,12 @@ async fn post(script: &str, content_type: &str, body: &str) -> String {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
 
     String::from_utf8_lossy(&body).to_string()
 }

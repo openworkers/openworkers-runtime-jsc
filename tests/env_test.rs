@@ -31,6 +31,11 @@ async fn test_env_value_with_quotes_and_newlines() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), value);
 }

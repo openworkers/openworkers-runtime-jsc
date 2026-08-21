@@ -17,7 +17,11 @@ fn request() -> HttpRequest {
 }
 
 async fn collect(body: ResponseBody) -> String {
-    let bytes = body.collect().await.unwrap_or_default();
+    let bytes = body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .unwrap_or_default();
 
     String::from_utf8_lossy(&bytes).to_string()
 }

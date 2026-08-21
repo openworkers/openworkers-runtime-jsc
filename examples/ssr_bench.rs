@@ -119,7 +119,7 @@ async fn render(worker: &mut Worker, url: &str) -> Result<Rendered, String> {
         .map_err(|reason| format!("{:?}", reason))?;
 
     let response = rx.await.map_err(|e| e.to_string())?;
-    let body = response.body.collect().await.unwrap_or_default();
+    let body = response.body.collect().await?.unwrap_or_default();
 
     Ok(Rendered {
         status: response.status,

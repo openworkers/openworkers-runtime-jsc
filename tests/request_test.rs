@@ -37,7 +37,12 @@ async fn test_request_basic_construction() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -88,7 +93,12 @@ async fn test_request_with_body() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -135,7 +145,12 @@ async fn test_request_clone() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -187,7 +202,12 @@ async fn test_request_from_request() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -233,7 +253,12 @@ async fn test_request_json() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -278,7 +303,12 @@ async fn test_request_arraybuffer() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     let body_str = String::from_utf8_lossy(&body);
     let result: serde_json::Value = serde_json::from_str(&body_str).expect("Valid JSON");
 
@@ -313,7 +343,12 @@ async fn test_event_request_binary_body() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "0,34,92,10,255");
 }
 
@@ -344,7 +379,12 @@ async fn test_event_request_url_with_quote() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), url);
 
     let injected = worker

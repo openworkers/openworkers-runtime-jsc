@@ -34,7 +34,12 @@ async fn test_readable_stream_creation() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -73,7 +78,12 @@ async fn test_readable_stream_locked() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -121,7 +131,12 @@ async fn test_readable_stream_with_then() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -158,7 +173,12 @@ async fn test_response_stream_writes_a_view_from_its_offset() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
 
     assert_eq!(body.to_vec(), vec![5, 6, 7]);
 }

@@ -29,7 +29,12 @@ async fn test_headers_constructor_from_object() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -63,7 +68,12 @@ async fn test_headers_case_insensitive() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -97,7 +107,12 @@ async fn test_headers_append() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -129,7 +144,12 @@ async fn test_headers_has() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -162,7 +182,12 @@ async fn test_headers_delete() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -200,7 +225,12 @@ async fn test_headers_iteration() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -238,7 +268,12 @@ async fn test_headers_foreach() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -274,7 +309,12 @@ async fn test_headers_clone_from_headers() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }
 
@@ -350,6 +390,11 @@ async fn test_get_set_cookie_lists_every_cookie() {
     worker.exec(task).await.expect("Task should execute");
 
     let response = rx.await.expect("Should receive response");
-    let body = response.body.collect().await.expect("Should have body");
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("The body should not error")
+        .expect("Should have body");
     assert_eq!(String::from_utf8_lossy(&body), "OK");
 }

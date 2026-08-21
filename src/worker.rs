@@ -306,7 +306,7 @@ impl Worker {
     async fn trigger_task_event(&mut self, task_init: TaskInit) -> Result<(), TerminationReason> {
         // Extract scheduled time if this is a schedule-triggered task
         let scheduled_time = match &task_init.source {
-            Some(TaskSource::Schedule { time }) => Some(*time),
+            Some(TaskSource::Schedule { time, .. }) => Some(*time),
             _ => None,
         };
 

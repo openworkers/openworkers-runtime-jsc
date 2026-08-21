@@ -156,7 +156,12 @@ async fn dispatch(worker: &mut Worker, base_url: &str, spec: &RequestSpec) -> An
     worker.exec(task).await.expect("exec failed");
 
     let response = rx.await.expect("no response");
-    let body = response.body.collect().await.unwrap_or_default();
+    let body = response
+        .body
+        .collect()
+        .await
+        .expect("the response body errored")
+        .unwrap_or_default();
 
     Answer {
         status: response.status,
