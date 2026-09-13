@@ -780,7 +780,7 @@ dependencies = [
 
 [[package]]
 name = "openworkers-runtime-jsc"
-version = "0.15.0"
+version = "0.15.1"
 dependencies = [
  "bytes",
  "env_logger",
