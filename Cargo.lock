@@ -350,7 +350,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "39cab71617ae0d63f51a36d69f866391735b51691dbda63cf6f96d042b63efeb"
 dependencies = [
  "libc",
- "windows-sys 0.52.0",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]
@@ -774,8 +774,8 @@ checksum = "384b8ab6d37215f3c5301a95a4accb5d64aa607f1fcb26a11b5303878451b4fe"
 
 [[package]]
 name = "openworkers-core"
-version = "0.16.0"
-source = "git+https://github.com/openworkers/openworkers-core?tag=v0.16.0#08028398e68323dd3bb6b456ce63184ee1e2e8eb"
+version = "0.16.1"
+source = "git+https://github.com/openworkers/openworkers-core?tag=v0.16.1#7fea579e658d7b47c0b52d16c77b2e9d62f77bf6"
 dependencies = [
  "base64 0.23.1",
  "bytes",
