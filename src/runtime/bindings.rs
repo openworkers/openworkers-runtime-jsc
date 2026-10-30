@@ -795,3 +795,83 @@ pub fn setup_response_stream_ops(
         .set_property(context, "__responseStreamEnd", end_stream.into())
         .unwrap();
 }
+
+/// Setup `__makeInvokeBinding(name)`, the `env.<NAME>` object of an invoke binding.
+///
+/// The arguments cross as JSON text, so a value that cannot be JSON (a cycle, a
+/// BigInt) is a TypeError from JSON.stringify before anything reaches the host.
+#[cfg(feature = "invoke")]
+pub fn setup_invoke(
+    context: &mut JSContext,
+    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
+    next_id: CallbackCounter,
+) {
+    let invoke_fn = rusty_jsc::callback_closure!(
+        context,
+        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
+            if args.len() < 4 {
+                return Err(JSValue::string(&ctx, "invoke: missing arguments"));
+            }
+
+            let text = |index: usize| {
+                args[index]
+                    .to_js_string(&ctx)
+                    .map(|s| s.to_string())
+                    .map_err(|_| JSValue::string(&ctx, "invoke: the arguments are not strings"))
+            };
+
+            let binding = text(0)?;
+            let command = text(1)?;
+            let json = text(2)?;
+
+            let settle = args[3]
+                .to_object(&ctx)
+                .map_err(|_| JSValue::string(&ctx, "invoke: the callback is not a function"))?;
+
+            let callback_id = next_callback_id(&next_id);
+
+            store_callback(&ctx, callback_id, settle)?;
+
+            let _ = scheduler_tx.send(SchedulerMessage::Invoke(
+                callback_id,
+                binding,
+                command,
+                json,
+            ));
+
+            Ok(JSValue::undefined(&ctx))
+        }
+    );
+
+    let mut global = context.get_global_object();
+
+    global
+        .set_property(context, "__nativeInvoke", invoke_fn.into())
+        .unwrap();
+
+    let wrapper = r#"
+        globalThis.__makeInvokeBinding = function (name) {
+            return {
+                invoke(command, args) {
+                    if (typeof command !== 'string') {
+                        return Promise.reject(new TypeError('invoke: the command is not a string'));
+                    }
+
+                    return new Promise((resolve, reject) => {
+                        __nativeInvoke(name, command, JSON.stringify(args === undefined ? null : args), (ok, payload) => {
+                            if (ok) {
+                                resolve(JSON.parse(payload));
+                            } else {
+                                reject(new Error(payload));
+                            }
+                        });
+                    });
+                },
+            };
+        };
+    "#;
+
+    context
+        .evaluate_script(wrapper, 1)
+        .expect("Failed to setup the invoke binding");
+}

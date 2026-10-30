@@ -135,6 +135,9 @@ pub enum SchedulerMessage {
     StreamRead(CallbackId, stream_manager::StreamId),
     /// Cancel/close a stream
     StreamCancel(stream_manager::StreamId),
+    /// Call a function of the host: (callback_id, binding, command, arguments as JSON)
+    #[cfg(feature = "invoke")]
+    Invoke(CallbackId, String, String, String),
     /// Shutdown the event loop
     Shutdown,
 }
@@ -151,6 +154,9 @@ pub enum CallbackMessage {
     FetchStreamingSuccess(CallbackId, HttpResponseMeta, stream_manager::StreamId),
     /// Stream chunk ready
     StreamChunk(CallbackId, stream_manager::StreamChunk),
+    /// A host function answered: the call settles with `Ok(JSON)` or `Err(message)`
+    #[cfg(feature = "invoke")]
+    InvokeSettled(CallbackId, Result<String, String>),
 }
 
 /// Runtime that manages JSContext and tokio event loop
@@ -219,6 +225,9 @@ impl Runtime {
         // Setup timer bindings (pass shared state)
         bindings::setup_timer(&mut context, scheduler_tx.clone(), next_callback_id.clone());
 
+        #[cfg(feature = "invoke")]
+        bindings::setup_invoke(&mut context, scheduler_tx.clone(), next_callback_id.clone());
+
         // Setup stream operations for native streaming
         bindings::setup_stream_ops(&mut context, scheduler_tx.clone(), next_callback_id);
 
@@ -266,6 +275,17 @@ impl Runtime {
                         error_text(&self.context, &e)
                     ),
                 }
+            }
+            #[cfg(feature = "invoke")]
+            CallbackMessage::InvokeSettled(callback_id, answer) => {
+                let (ok, payload) = match answer {
+                    Ok(json) => (true, json),
+                    Err(message) => (false, message),
+                };
+                let ok = JSValue::boolean(&self.context, ok);
+                let payload = JSValue::string(&self.context, payload.as_str());
+
+                self.run_callback(callback_id, &[ok, payload]);
             }
             CallbackMessage::StreamChunk(callback_id, chunk) => {
                 match self.make_chunk_result(chunk) {
@@ -449,6 +469,24 @@ pub async fn run_event_loop(
                             let _ = callback_tx.send(CallbackMessage::FetchError(promise_id, e));
                         }
                     }
+                });
+            }
+            #[cfg(feature = "invoke")]
+            SchedulerMessage::Invoke(callback_id, binding, command, args) => {
+                let callback_tx = callback_tx.clone();
+                let ops = ops.clone();
+
+                tokio::spawn(async move {
+                    let answer = match serde_json::from_str(&args) {
+                        Ok(args) => match ops.handle_binding_invoke(&binding, &command, args).await
+                        {
+                            openworkers_core::InvokeResult::Value(value) => Ok(value.to_string()),
+                            openworkers_core::InvokeResult::Error(message) => Err(message),
+                        },
+                        Err(e) => Err(format!("bad invoke arguments: {e}")),
+                    };
+
+                    let _ = callback_tx.send(CallbackMessage::InvokeSettled(callback_id, answer));
                 });
             }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {

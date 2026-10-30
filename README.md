@@ -28,6 +28,9 @@ let response = rx.await?;
 - **Text encoding** - TextEncoder, TextDecoder
 - **Base64** - atob, btoa
 - **Crypto** - getRandomValues, randomUUID, SubtleCrypto
+- **Invoke binding** - with the `invoke` feature, `env.<NAME>.invoke(command, args)`
+  calls `OperationsHandler::handle_binding_invoke` with JSON arguments; the
+  other binding types are not served
 
 ## Web APIs
 

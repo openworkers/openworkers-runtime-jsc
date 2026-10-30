@@ -6,6 +6,13 @@ pub use runtime::stream_manager::{StreamChunk, StreamManager};
 pub use runtime::{Runtime, run_event_loop};
 pub use worker::Worker;
 
+/// Binding types this runtime serves, for an embedder that refuses a worker
+/// declaring one it cannot
+pub const SUPPORTED_BINDINGS: &[openworkers_core::BindingType] = &[
+    #[cfg(feature = "invoke")]
+    openworkers_core::BindingType::Invoke,
+];
+
 // Re-export common types from openworkers-core
 pub use openworkers_core::{
     DefaultOps, Event, EventType, FetchInit, HttpMethod, HttpRequest, HttpResponse,

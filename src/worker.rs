@@ -81,7 +81,7 @@ impl Worker {
         setup_event_listener(&mut runtime.context, completion.clone());
 
         // Setup environment variables
-        setup_env(&mut runtime.context, &script.env);
+        setup_env(&mut runtime.context, &script.env, &script.bindings);
 
         // Setup console
         crate::runtime::bindings::setup_console(&mut runtime.context, Some(ops.clone()));
@@ -780,6 +780,7 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
 fn setup_env(
     context: &mut rusty_jsc::JSContext,
     env: &Option<std::collections::HashMap<String, String>>,
+    bindings: &[openworkers_core::BindingInfo],
 ) {
     let env_json = match env {
         Some(env_map) => serde_json::to_string(env_map).expect("env is a map of strings"),
@@ -788,15 +789,36 @@ fn setup_env(
 
     let script = format!(
         r#"Object.defineProperty(globalThis, 'env', {{
-            value: {},
+            value: Object.assign({}, {{{}}}),
             writable: false,
             enumerable: true,
             configurable: false
         }});"#,
-        env_json
+        env_json,
+        binding_objects(bindings).join(",")
     );
 
     context.evaluate_script(&script, 1).unwrap();
+}
+
+/// One `env` object per binding this runtime serves, which wins over a variable
+/// of the same name
+#[cfg(feature = "invoke")]
+fn binding_objects(bindings: &[openworkers_core::BindingInfo]) -> Vec<String> {
+    bindings
+        .iter()
+        .filter(|binding| binding.binding_type == openworkers_core::BindingType::Invoke)
+        .map(|binding| {
+            let name = serde_json::to_string(&binding.name).expect("a string serialises");
+
+            format!("{name}: __makeInvokeBinding({name})")
+        })
+        .collect()
+}
+
+#[cfg(not(feature = "invoke"))]
+fn binding_objects(_bindings: &[openworkers_core::BindingInfo]) -> Vec<String> {
+    Vec::new()
 }
 
 impl openworkers_core::Worker for Worker {
