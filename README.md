@@ -57,10 +57,27 @@ let response = rx.await?;
 
 See [TODO.md](TODO.md) for planned features.
 
+## JavaScriptCore builds
+
+| Feature | JavaScriptCore |
+| ------- | -------------- |
+| `system` (default) | JavaScriptCore.framework of macOS |
+| `static` | the pinned static JSC of oven-sh/WebKit, macOS arm64 only (wins over `system`) |
+
+- With the JIT, the CPU limit needs polling traps: call
+  `openworkers_jsc::init` with `polling_traps` before other threads start,
+  or set `JSC_usePollingTraps=true`. The system framework runs the JIT only
+  in a binary with the `com.apple.security.cs.allow-jit` entitlement; the
+  static build always runs it.
+- `static`: the WTF timers (GC, sweeper, FinalizationRegistry callbacks) go
+  to a host per thread, which the worker fires from its event loop under its
+  CPU budget.
+
 ## Testing
 
 ```bash
-cargo test
+cargo test --features invoke
+JSC_usePollingTraps=true cargo test --features invoke,static
 ```
 
 ## License

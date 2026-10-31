@@ -10,6 +10,9 @@ pub mod stream_manager;
 mod streams;
 mod text_encoding;
 
+#[cfg(feature = "static")]
+mod timers;
+
 mod url;
 
 // Re-export fetch functions for internal use
@@ -144,6 +147,9 @@ pub struct Runtime {
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
     /// The CPU budget of each call into JavaScript; none until a worker sets one
     pub(crate) cpu: CpuLimit,
+    /// The WTF timers of this thread
+    #[cfg(feature = "static")]
+    timers: Arc<timers::Timers>,
 }
 
 impl Runtime {
@@ -158,6 +164,10 @@ impl Runtime {
 
         let next_callback_id: bindings::CallbackCounter = Rc::new(std::cell::Cell::new(1));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
+
+        // Before the first context of the thread
+        #[cfg(feature = "static")]
+        let timers = timers::host();
 
         let context = Context::new();
 
@@ -220,9 +230,38 @@ impl Runtime {
             callback_rx,
             stream_manager: stream_manager.clone(),
             cpu,
+            #[cfg(feature = "static")]
+            timers,
         };
 
         (runtime, scheduler_rx, callback_tx, stream_manager)
+    }
+
+    /// Completes when a WTF timer is due. Never in the system build, whose
+    /// timers wait on a CFRunLoop that nothing runs.
+    pub(crate) fn timers_due(&self) -> impl Future<Output = ()> + 'static {
+        #[cfg(feature = "static")]
+        {
+            let timers = self.timers.clone();
+
+            async move { timers.due().await }
+        }
+
+        #[cfg(not(feature = "static"))]
+        std::future::pending()
+    }
+
+    /// Fires the WTF timers that are due, under the CPU budget, since a
+    /// timer can run guest code (FinalizationRegistry callbacks).
+    pub(crate) fn fire_timers(&self) -> Result<(), TerminationReason> {
+        #[cfg(feature = "static")]
+        while let Some(timer) = self.timers.take_due() {
+            // SAFETY: this is the host thread, between calls into JSC; the
+            // host got the timer from schedule and no cancel since
+            self.cpu.run(|| unsafe { timer.fire() })?;
+        }
+
+        Ok(())
     }
 
     /// Process pending callbacks (non-blocking), until the CPU budget is spent

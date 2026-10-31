@@ -9,6 +9,8 @@ default = ["system"]
 invoke = ["openworkers-core/invoke"]
 # JavaScriptCore.framework of macOS
 system = ["openworkers-jsc/system"]
+# The pinned static JavaScriptCore of oven-sh/WebKit; wins over system
+static = ["openworkers-jsc/static"]
 
 [dependencies]
 # Common types

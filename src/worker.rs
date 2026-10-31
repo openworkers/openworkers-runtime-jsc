@@ -437,6 +437,7 @@ impl Worker {
         deadline: Option<tokio::time::Instant>,
     ) -> Result<(), TerminationReason> {
         loop {
+            let timers = self.runtime.timers_due();
             let bytes = tokio::select! {
                 biased;
 
@@ -459,6 +460,11 @@ impl Worker {
                             "Event loop stopped".to_string(),
                         )),
                     }
+
+                    continue;
+                }
+                _ = timers => {
+                    self.runtime.fire_timers()?;
 
                     continue;
                 }
@@ -551,6 +557,8 @@ impl Worker {
         deadline: Option<tokio::time::Instant>,
     ) -> Result<String, TerminationReason> {
         loop {
+            let timers = self.runtime.timers_due();
+
             tokio::select! {
                 result = &mut done_rx => {
                     return result.map_err(|_| {
@@ -569,6 +577,7 @@ impl Worker {
                         }
                     }
                 }
+                _ = timers => self.runtime.fire_timers()?,
                 _ = at_deadline(deadline) => {
                     return Err(TerminationReason::WallClockTimeout);
                 }

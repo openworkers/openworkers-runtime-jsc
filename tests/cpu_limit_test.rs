@@ -355,8 +355,8 @@ async fn a_top_level_gets_at_least_400_ms() {
 
 // The host reads the text of a value that a callback threw even when logging
 // is off: a log macro skips its arguments then, and the read must run under
-// the budget in every build. The system framework reads the text once for its
-// inspector, the host once more: 2 reads (1 when the host read was skipped).
+// the budget in every build. The system framework reads the text once more
+// for its inspector, the static build does not.
 #[tokio::test]
 async fn a_thrown_value_is_read_with_logging_off() {
     log::set_max_level(log::LevelFilter::Off);
@@ -372,5 +372,10 @@ async fn a_thrown_value_is_read_with_logging_off() {
     worker.exec(task).await.unwrap();
     assert_eq!(body(rx).await, "ok");
 
-    assert_eq!(worker.evaluate("globalThis.reads").unwrap(), "2");
+    let reads = match cfg!(feature = "static") {
+        true => "1",
+        false => "2",
+    };
+
+    assert_eq!(worker.evaluate("globalThis.reads").unwrap(), reads);
 }
