@@ -138,6 +138,8 @@ pub enum SchedulerMessage {
     /// Call a function of the host: (callback_id, binding, command, arguments as JSON)
     #[cfg(feature = "invoke")]
     Invoke(CallbackId, String, String, String),
+    /// Drop every timer and task of the event that ended
+    ClearAll,
     /// Shutdown the event loop
     Shutdown,
 }
@@ -400,8 +402,20 @@ pub async fn run_event_loop(
     // Track running tasks so we can cancel them
     let mut running_tasks: HashMap<CallbackId, JoinHandle<()>> = HashMap::new();
 
+    // Fetch, invoke and stream reads: cancelled with the event that made them
+    let mut tasks: Vec<JoinHandle<()>> = Vec::new();
+
     while let Some(msg) = scheduler_rx.recv().await {
         match msg {
+            SchedulerMessage::ClearAll => {
+                for (_, handle) in running_tasks.drain() {
+                    handle.abort();
+                }
+
+                for handle in tasks.drain(..) {
+                    handle.abort();
+                }
+            }
             SchedulerMessage::ScheduleTimeout(callback_id, delay_ms) => {
                 log::debug!(
                     "Scheduling timeout {} with delay {}ms",
@@ -458,7 +472,7 @@ pub async fn run_event_loop(
                 let manager = stream_manager.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     match execute_fetch_via_ops(request, manager, ops).await {
                         Ok((meta, stream_id)) => {
                             let _ = callback_tx.send(CallbackMessage::FetchStreamingSuccess(
@@ -470,13 +484,16 @@ pub async fn run_event_loop(
                         }
                     }
                 });
+
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
             }
             #[cfg(feature = "invoke")]
             SchedulerMessage::Invoke(callback_id, binding, command, args) => {
                 let callback_tx = callback_tx.clone();
                 let ops = ops.clone();
 
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let answer = match serde_json::from_str(&args) {
                         Ok(args) => match ops.handle_binding_invoke(&binding, &command, args).await
                         {
@@ -488,19 +505,25 @@ pub async fn run_event_loop(
 
                     let _ = callback_tx.send(CallbackMessage::InvokeSettled(callback_id, answer));
                 });
+
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
             }
             SchedulerMessage::StreamRead(callback_id, stream_id) => {
                 log::debug!("Reading stream {} for callback {}", stream_id, callback_id);
 
                 let callback_tx = callback_tx.clone();
                 let manager = stream_manager.clone();
-                tokio::spawn(async move {
+                let handle = tokio::spawn(async move {
                     let chunk = match manager.read_chunk(stream_id).await {
                         Ok(chunk) => chunk,
                         Err(e) => stream_manager::StreamChunk::Error(e),
                     };
                     let _ = callback_tx.send(CallbackMessage::StreamChunk(callback_id, chunk));
                 });
+
+                tasks.retain(|task| !task.is_finished());
+                tasks.push(handle);
             }
             SchedulerMessage::StreamCancel(stream_id) => {
                 log::debug!("Cancelling stream {}", stream_id);

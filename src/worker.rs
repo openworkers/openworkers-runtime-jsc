@@ -126,6 +126,37 @@ impl Worker {
         Self::new_with_ops(script, limits, ops).await
     }
 
+    /// Makes the worker ready for its next event: drops the timers, the
+    /// pending callbacks and the tasks of the previous one. It runs no
+    /// JavaScript that the guest can change. An error means the worker must
+    /// not be used.
+    pub fn reset(&mut self) -> Result<(), TerminationReason> {
+        self.stop_tasks();
+
+        // Answers to the previous event find no callback after the clear
+        while self.runtime.callback_rx.try_recv().is_ok() {}
+
+        crate::runtime::bindings::call_global(&self.runtime.context, "__clearCallbacks", &[])
+            .map(|_| ())
+            .map_err(|_| TerminationReason::Other("the reset of the worker failed".to_string()))
+    }
+
+    /// Stops the timers, fetches, invokes and stream reads of the event that
+    /// ended, so an idle worker queues no callback. The event loop takes its
+    /// messages in order, so the tasks of a later event are not stopped.
+    fn stop_tasks(&self) {
+        self.runtime
+            .scheduler_tx
+            .send(crate::runtime::SchedulerMessage::ClearAll)
+            .ok();
+    }
+
+    /// The callbacks that wait for the next entry into JavaScript.
+    #[doc(hidden)]
+    pub fn queued_callbacks(&self) -> usize {
+        self.runtime.callback_rx.len()
+    }
+
     /// Abort the worker execution
     pub fn abort(&mut self) {
         self.aborted.store(true, Ordering::SeqCst);
@@ -137,7 +168,15 @@ impl Worker {
     /// A `ResponseBody::Stream` has to be read while this future is polled: the
     /// guest produces its body from here, and stops once `stream_buffer_size`
     /// chunks are waiting for a reader.
-    pub async fn exec(&mut self, mut event: Event) -> Result<(), TerminationReason> {
+    pub async fn exec(&mut self, event: Event) -> Result<(), TerminationReason> {
+        let result = self.exec_event(event).await;
+
+        self.stop_tasks();
+
+        result
+    }
+
+    async fn exec_event(&mut self, mut event: Event) -> Result<(), TerminationReason> {
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
@@ -162,7 +201,18 @@ impl Worker {
     }
 
     /// Execute an event and return the HTTP response directly
-    pub async fn exec_http(&mut self, mut event: Event) -> Result<HttpResponse, TerminationReason> {
+    pub async fn exec_http(&mut self, event: Event) -> Result<HttpResponse, TerminationReason> {
+        let result = self.exec_http_event(event).await;
+
+        self.stop_tasks();
+
+        result
+    }
+
+    async fn exec_http_event(
+        &mut self,
+        mut event: Event,
+    ) -> Result<HttpResponse, TerminationReason> {
         match event {
             Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(

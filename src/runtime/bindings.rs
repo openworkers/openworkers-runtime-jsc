@@ -25,6 +25,19 @@ fn next_callback_id(counter: &CallbackCounter) -> CallbackId {
 const CALLBACK_REGISTRY_JS: &str = r#"
     (function() {
         const callbacks = new Map();
+        const apply = Reflect.apply;
+        const clearMap = Map.prototype.clear;
+
+        // The reset between two events. Made before guest code, with the
+        // builtins it calls, and read-only: a guest cannot change what it does
+        Object.defineProperty(globalThis, '__clearCallbacks', {
+            value: function() {
+                apply(clearMap, callbacks, []);
+            },
+            writable: false,
+            configurable: false,
+            enumerable: false,
+        });
 
         globalThis.__storeCallback = function(id, callback) {
             callbacks.set(id, callback);
