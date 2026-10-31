@@ -1,34 +1,37 @@
 use bytes::Bytes;
 use openworkers_core::{HttpMethod, HttpRequest, RequestBody};
-use rusty_jsc::{JSContext, JSObject, JSValue};
+use openworkers_jsc::Context;
+use openworkers_jsc::Object;
+use openworkers_jsc::Value;
 use std::collections::HashMap;
 use std::str::FromStr;
 
 /// Parse headers from JS options object
 pub fn parse_headers_from_js(
-    context: &JSContext,
-    headers_val: JSValue,
+    context: &Context,
+    headers_val: Value,
 ) -> Result<HashMap<String, String>, String> {
     let mut headers = HashMap::new();
 
     // A Headers instance carries its entries in a Map, not in own properties
     let normalize = context
-        .get_global_object()
+        .global_object()
         .get_property(context, "__normalizeHeaders")
+        .ok()
         .and_then(|value| value.to_object(context).ok())
         .ok_or("__normalizeHeaders is missing")?;
 
     let headers_obj = normalize
-        .call_as_function(context, None, &[headers_val])
+        .call(context, None, &[headers_val])
         .map_err(|_| "Headers must be a HeadersInit")?
         .to_object(context)
         .map_err(|_| "Headers must be an object")?;
 
-    let prop_names = headers_obj.get_property_names(context);
+    let prop_names = headers_obj.property_names(context);
 
     for prop_name in prop_names {
-        if let Some(value_val) = headers_obj.get_property(context, prop_name.as_str())
-            && let Ok(value_str) = value_val.to_js_string(context)
+        if let Ok(value_val) = headers_obj.get_property(context, prop_name.as_str())
+            && let Ok(value_str) = value_val.to_string(context)
         {
             headers.insert(prop_name, value_str.to_string());
         }
@@ -38,8 +41,8 @@ pub fn parse_headers_from_js(
 }
 
 /// Read a property, treating `null` and `undefined` as absent
-fn defined_property(context: &JSContext, obj: &JSObject, name: &str) -> Option<JSValue> {
-    let value = obj.get_property(context, name)?;
+fn defined_property<'c>(context: &Context, obj: &Object<'c>, name: &str) -> Option<Value<'c>> {
+    let value = obj.get_property(context, name).ok()?;
 
     if value.is_undefined(context) || value.is_null(context) {
         return None;
@@ -50,9 +53,9 @@ fn defined_property(context: &JSContext, obj: &JSObject, name: &str) -> Option<J
 
 /// Parse fetch options from JavaScript
 pub fn parse_fetch_options(
-    context: &JSContext,
+    context: &Context,
     url: String,
-    options_val: Option<JSValue>,
+    options_val: Option<Value>,
 ) -> Result<HttpRequest, String> {
     let mut method = HttpMethod::Get;
     let mut headers = HashMap::new();
@@ -64,7 +67,7 @@ pub fn parse_fetch_options(
             .map_err(|_| "Options must be an object")?;
 
         if let Some(method_val) = defined_property(context, &options_obj, "method")
-            && let Ok(method_str) = method_val.to_js_string(context)
+            && let Ok(method_str) = method_val.to_string(context)
         {
             method = HttpMethod::from_str(&method_str.to_string())
                 .map_err(|_| format!("Invalid HTTP method: {}", method_str))?;
@@ -77,7 +80,7 @@ pub fn parse_fetch_options(
         if let Some(body_val) = defined_property(context, &options_obj, "body") {
             body = match super::typed_array_bytes(context, &body_val) {
                 Some(bytes) => RequestBody::Bytes(bytes),
-                None => match body_val.to_js_string(context) {
+                None => match body_val.to_string(context) {
                     Ok(text) => RequestBody::Bytes(Bytes::from(text.to_string())),
                     Err(_) => RequestBody::None,
                 },

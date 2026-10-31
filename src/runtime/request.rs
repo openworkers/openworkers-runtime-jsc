@@ -164,11 +164,11 @@ pub const REQUEST_JS: &str = r#"
     };
 "#;
 
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup Request class
-pub fn setup_request(context: &mut JSContext) {
+pub fn setup_request(context: &Context) {
     context
-        .evaluate_script(REQUEST_JS, 1)
+        .evaluate_script(REQUEST_JS)
         .expect("Failed to setup Request class");
 }

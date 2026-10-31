@@ -50,7 +50,7 @@ async fn test_settimeout_with_missing_args() {
     // An evaluation error is also acceptable here
     if let Ok(result) = runner.runtime.evaluate(check) {
         assert!(
-            result.to_bool(&runner.runtime.context),
+            result.to_boolean(&runner.runtime.context),
             "setTimeout with no args should throw error"
         );
     }
@@ -83,7 +83,7 @@ async fn test_error_in_timeout_callback() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             assert!(
-                result.to_bool(&runner.runtime.context),
+                result.to_boolean(&runner.runtime.context),
                 "Script should execute before timeout error"
             );
         }

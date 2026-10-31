@@ -49,7 +49,7 @@ async fn test_comprehensive_timer_scenario() {
     let check = r#"globalThis.events.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(events_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(events_str) = result.to_string(&runner.runtime.context) {
                 let events = events_str.to_string();
 
                 // Should contain all expected events
@@ -94,7 +94,7 @@ async fn test_date_now_works() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             assert!(
-                result.to_bool(&runner.runtime.context),
+                result.to_boolean(&runner.runtime.context),
                 "Date.now() should return a valid timestamp"
             );
         }

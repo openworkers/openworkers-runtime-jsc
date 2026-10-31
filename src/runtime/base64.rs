@@ -1,7 +1,7 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup atob/btoa (Base64 encoding/decoding)
-pub fn setup_base64(context: &mut JSContext) {
+pub fn setup_base64(context: &Context) {
     let code = r#"
         // Base64 encoding/decoding (atob/btoa)
         const BASE64_CHARS = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
@@ -65,6 +65,6 @@ pub fn setup_base64(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup atob/btoa");
 }

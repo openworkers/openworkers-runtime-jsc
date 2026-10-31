@@ -1,7 +1,7 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup ReadableStream API (WHATWG Streams spec)
-pub fn setup_readable_stream(context: &mut JSContext) {
+pub fn setup_readable_stream(context: &Context) {
     let code = r#"
         // ReadableStream implementation (simplified WHATWG spec)
         globalThis.ReadableStream = class ReadableStream {
@@ -279,6 +279,6 @@ pub fn setup_readable_stream(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup ReadableStream");
 }

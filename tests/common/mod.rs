@@ -37,7 +37,7 @@ impl TestRunner {
         match self.runtime.evaluate(script) {
             Ok(_) => Ok(()),
             Err(e) => {
-                if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
+                if let Ok(err_str) = e.to_string(&self.runtime.context) {
                     Err(err_str.to_string())
                 } else {
                     Err("Unknown error".to_string())

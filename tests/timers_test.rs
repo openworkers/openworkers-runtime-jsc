@@ -24,7 +24,7 @@ async fn test_settimeout_basic() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             assert!(
-                result.to_bool(&runner.runtime.context),
+                result.to_boolean(&runner.runtime.context),
                 "Timeout should have fired"
             );
         }
@@ -178,7 +178,7 @@ async fn test_cleartimeout_prevents_execution() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             assert!(
-                !result.to_bool(&runner.runtime.context),
+                !result.to_boolean(&runner.runtime.context),
                 "Cleared timeout should not have executed"
             );
         }
@@ -209,7 +209,7 @@ async fn test_multiple_timers_execution_order() {
     let check = r#"globalThis.order.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(order_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(order_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     order_str.to_string(),
                     "B,A,C",
@@ -249,7 +249,7 @@ async fn test_nested_timers() {
     let check = r#"globalThis.result.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     result_str.to_string(),
                     "outer,inner",

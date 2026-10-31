@@ -26,7 +26,7 @@ fn collect_garbage(runner: &mut TestRunner) {
 
     runner.execute(canary).expect("Canary should be created");
 
-    unsafe { rusty_jsc::private::JSGarbageCollect(runner.runtime.context.get_ref()) };
+    runner.runtime.context.garbage_collect();
 
     let churn = r#"
         (function() {
@@ -44,7 +44,7 @@ fn collect_garbage(runner: &mut TestRunner) {
         .runtime
         .evaluate("globalThis.canary.deref() === undefined")
         .expect("Canary should be readable")
-        .to_bool(&runner.runtime.context);
+        .to_boolean(&runner.runtime.context);
 
     assert!(collected, "Nothing was collected, the probe proves nothing");
 }
@@ -70,7 +70,7 @@ async fn test_timeout_callback_survives_collection() {
         .runtime
         .evaluate("globalThis.fired")
         .expect("Result should be readable")
-        .to_bool(&runner.runtime.context);
+        .to_boolean(&runner.runtime.context);
 
     assert!(fired, "Timeout callback should survive a collection");
 
@@ -100,7 +100,7 @@ async fn test_fetch_resolve_survives_collection() {
         .runtime
         .evaluate("String(globalThis.body)")
         .expect("Result should be readable")
-        .to_js_string(&runner.runtime.context)
+        .to_string(&runner.runtime.context)
         .expect("Result should be a string")
         .to_string();
 

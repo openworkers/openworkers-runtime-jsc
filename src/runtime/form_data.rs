@@ -1,7 +1,7 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup FormData and the body decoder Request/Response.formData() calls
-pub fn setup_form_data(context: &mut JSContext) {
+pub fn setup_form_data(context: &Context) {
     let code = r#"
         globalThis.FormData = class FormData {
             constructor() {
@@ -98,6 +98,6 @@ pub fn setup_form_data(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup FormData");
 }

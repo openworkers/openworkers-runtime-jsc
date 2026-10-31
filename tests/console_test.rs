@@ -161,9 +161,9 @@ async fn log_from_child() {
     .await
     .expect("worker creation failed");
 
-    let (mut runtime, ..) = Runtime::new();
+    let (runtime, ..) = Runtime::new();
 
-    setup_console(&mut runtime.context, None);
+    setup_console(&runtime.context, None);
 
     let script = format!(r#"console.log("{}");"#, FALLBACK_MARKER);
 

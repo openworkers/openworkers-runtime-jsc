@@ -16,39 +16,31 @@
 //! deadline. Any entry is cut at most PERIOD after the budget runs out.
 //!
 //! JSContextGroupSetExecutionTimeLimit is private API of JavaScriptCore
-//! (JSContextRefPrivate.h), declared here. The Linux path is not tested.
+//! (JSContextRefPrivate.h), which openworkers-jsc declares.
 //!
 //! Known limits:
 //! - The watchdog does not cut native code, such as a regular expression
 //!   that backtracks: `(a+)+b` ran 1.7 s against a limit of 50 ms. Its time
 //!   is still taken from the budget when the entry returns.
-//! - With the JIT, the watchdog cuts JIT code only with polling traps: set
-//!   JSC_usePollingTraps=true. Without it the check below fails, and no worker
-//!   starts.
+//! - With the JIT, the watchdog cuts JIT code only with polling traps: call
+//!   openworkers_jsc::init with polling_traps. Without them the check below
+//!   fails, and no worker starts.
 //! - The check runs a loop on a thread of its own. If the limit does not
 //!   work, that thread spins for the life of the process.
 //! - Only the CPU time of the thread that calls is counted, not the GC and
 //!   JIT threads of JavaScriptCore.
 
 use openworkers_core::TerminationReason;
-use rusty_jsc::JSContext;
-use rusty_jsc::private::{JSContextGetGroup, JSContextGroupRef, JSContextRef};
+use openworkers_jsc::Context;
+use openworkers_jsc::sys::JSContextGetGroup;
+use openworkers_jsc::sys::JSContextGroupRef;
+use openworkers_jsc::sys::JSContextGroupSetExecutionTimeLimit;
+use openworkers_jsc::sys::JSContextRef;
 use std::cell::Cell;
 use std::ffi::c_void;
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::time::Duration;
-
-type ShouldTerminate = unsafe extern "C" fn(JSContextRef, *mut c_void) -> bool;
-
-unsafe extern "C" {
-    fn JSContextGroupSetExecutionTimeLimit(
-        group: JSContextGroupRef,
-        limit: f64,
-        callback: Option<ShouldTerminate>,
-        context: *mut c_void,
-    );
-}
 
 /// The longest CPU time of an entry between two checks of the deadline
 const PERIOD: Duration = Duration::from_millis(5);
@@ -126,7 +118,7 @@ struct Entry(Duration);
 
 impl CpuLimit {
     /// A budget of `limit_ms` on the group of `context`. 0 ms means none.
-    pub fn new(context: &JSContext, limit_ms: u64) -> Result<Self, TerminationReason> {
+    pub fn new(context: &Context, limit_ms: u64) -> Result<Self, TerminationReason> {
         let budget = Duration::from_millis(limit_ms);
         let mut limit = Self {
             watch: Box::new(Watch {
@@ -151,7 +143,7 @@ impl CpuLimit {
         }
 
         // SAFETY: the context is live
-        limit.group = Some(unsafe { JSContextGetGroup(context.get_ref()) });
+        limit.group = Some(unsafe { JSContextGetGroup(context.as_raw()) });
 
         Ok(limit)
     }
@@ -245,7 +237,7 @@ fn works() -> bool {
         let spawned = std::thread::Builder::new()
             .name("jsc-cpu-limit-check".into())
             .spawn(move || {
-                let mut context = JSContext::default();
+                let context = Context::new();
 
                 // A deadline of 0: the first check cuts
                 let watch = Watch {
@@ -257,14 +249,14 @@ fn works() -> bool {
                 // script, the only time the watchdog runs
                 unsafe {
                     JSContextGroupSetExecutionTimeLimit(
-                        JSContextGetGroup(context.get_ref()),
+                        JSContextGetGroup(context.as_raw()),
                         0.01,
                         Some(check),
                         &watch as *const Watch as *mut c_void,
                     );
                 }
 
-                let ended = context.evaluate_script("for (;;) {}", 1).is_err();
+                let ended = context.evaluate_script("for (;;) {}").is_err();
 
                 done.send(ended && watch.hit.load(Ordering::SeqCst)).ok();
             });

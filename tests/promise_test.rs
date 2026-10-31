@@ -55,7 +55,7 @@ async fn test_promise_reject() {
     let check = r#"globalThis.promiseError"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(error_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(error_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     error_str.to_string(),
                     "test error",
@@ -131,7 +131,7 @@ async fn test_promise_constructor() {
     let check = r#"globalThis.constructorResult"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     result_str.to_string(),
                     "success",
@@ -178,7 +178,7 @@ async fn test_promise_async_with_settimeout() {
     let check = r#"globalThis.results.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 let results = result_str.to_string();
 
                 // Check execution order
@@ -221,7 +221,7 @@ async fn test_promise_all() {
     let check = r#"globalThis.allResult"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     result_str.to_string(),
                     "1,2,3",
@@ -260,7 +260,7 @@ async fn test_promise_race() {
     let check = r#"globalThis.raceResult"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     result_str.to_string(),
                     "fast",
@@ -306,7 +306,7 @@ async fn test_queue_microtask() {
     let check = r#"globalThis.results.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 let results = result_str.to_string();
 
                 // Microtasks should run after all sync code
@@ -361,7 +361,7 @@ async fn test_microtask_vs_timeout() {
     let check = r#"globalThis.order.join(',')"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(result_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(result_str) = result.to_string(&runner.runtime.context) {
                 let order = result_str.to_string();
 
                 // Order should be: sync -> microtask -> timeout

@@ -94,15 +94,15 @@ async fn test_fetch_basic_get() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(status_val) = obj.get_property(&runner.runtime.context, "status")
+                if let Ok(status_val) = obj.get_property(&runner.runtime.context, "status")
                     && let Ok(status) = status_val.to_number(&runner.runtime.context)
                 {
                     assert_eq!(status, 200.0, "Should get 200 OK response");
                 }
 
-                if let Some(ok_val) = obj.get_property(&runner.runtime.context, "ok") {
+                if let Ok(ok_val) = obj.get_property(&runner.runtime.context, "ok") {
                     assert!(
-                        ok_val.to_bool(&runner.runtime.context),
+                        ok_val.to_boolean(&runner.runtime.context),
                         "Response should be ok"
                     );
                 }
@@ -140,7 +140,7 @@ async fn test_fetch_with_text() {
     let check = r#"typeof globalThis.textResult"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(type_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(type_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(type_str.to_string(), "string", "Should get text response");
             }
         }
@@ -188,7 +188,7 @@ async fn test_fetch_404_error() {
     match runner.runtime.evaluate(check_ok) {
         Ok(result) => {
             assert!(
-                !result.to_bool(&runner.runtime.context),
+                !result.to_boolean(&runner.runtime.context),
                 "404 response should not be ok"
             );
         }
@@ -224,7 +224,7 @@ async fn test_fetch_json() {
     let check = r#"typeof globalThis.jsonResult"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(type_str) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(type_str) = result.to_string(&runner.runtime.context) {
                 assert_eq!(
                     type_str.to_string(),
                     "object",
@@ -271,7 +271,7 @@ async fn test_fetch_with_custom_method() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             assert!(
-                result.to_bool(&runner.runtime.context),
+                result.to_boolean(&runner.runtime.context),
                 "Should get a response from POST"
             );
         }
@@ -317,16 +317,15 @@ async fn test_fetch_post_with_body() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(has_response) = obj.get_property(&runner.runtime.context, "hasResponse")
-                {
+                if let Ok(has_response) = obj.get_property(&runner.runtime.context, "hasResponse") {
                     assert!(
-                        has_response.to_bool(&runner.runtime.context),
+                        has_response.to_boolean(&runner.runtime.context),
                         "POST should return response"
                     );
                 }
-                if let Some(is_string) = obj.get_property(&runner.runtime.context, "isString") {
+                if let Ok(is_string) = obj.get_property(&runner.runtime.context, "isString") {
                     assert!(
-                        is_string.to_bool(&runner.runtime.context),
+                        is_string.to_boolean(&runner.runtime.context),
                         "Response should be string"
                     );
                 }
@@ -368,15 +367,15 @@ async fn test_response_headers_api() {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
                 // Check has() works
-                if let Some(has_ct) = obj.get_property(&runner.runtime.context, "hasContentType") {
+                if let Ok(has_ct) = obj.get_property(&runner.runtime.context, "hasContentType") {
                     assert!(
-                        has_ct.to_bool(&runner.runtime.context),
+                        has_ct.to_boolean(&runner.runtime.context),
                         "should have content-type header"
                     );
                 }
 
                 // Check get() works and is case-insensitive
-                if let Some(ct_val) = obj.get_property(&runner.runtime.context, "contentType") {
+                if let Ok(ct_val) = obj.get_property(&runner.runtime.context, "contentType") {
                     assert!(
                         !ct_val.is_null(&runner.runtime.context),
                         "content-type should not be null"
@@ -384,14 +383,14 @@ async fn test_response_headers_api() {
                 }
 
                 // Check non-existent header
-                if let Some(has_ne) = obj.get_property(&runner.runtime.context, "hasNonExistent") {
+                if let Ok(has_ne) = obj.get_property(&runner.runtime.context, "hasNonExistent") {
                     assert!(
-                        !has_ne.to_bool(&runner.runtime.context),
+                        !has_ne.to_boolean(&runner.runtime.context),
                         "non-existent header should return false"
                     );
                 }
 
-                if let Some(ne_val) = obj.get_property(&runner.runtime.context, "nonExistent") {
+                if let Ok(ne_val) = obj.get_property(&runner.runtime.context, "nonExistent") {
                     assert!(
                         ne_val.is_null(&runner.runtime.context),
                         "non-existent header get should return null"
@@ -426,7 +425,7 @@ async fn test_fetch_rejects_on_a_network_error() {
         .runtime
         .evaluate("globalThis.outcome")
         .expect("Failed to check outcome")
-        .to_js_string(&runner.runtime.context)
+        .to_string(&runner.runtime.context)
         .expect("outcome should be a string")
         .to_string();
 

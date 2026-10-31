@@ -2,8 +2,9 @@ use super::stream_manager::StreamId;
 use super::stream_manager::TryWriteError;
 use super::{CallbackId, SchedulerMessage};
 use openworkers_core::{LogLevel, OperationsHandle};
-use rusty_jsc::{JSContext, JSObject, JSValue};
-use rusty_jsc_macros::callback;
+use openworkers_jsc::Context;
+use openworkers_jsc::Object;
+use openworkers_jsc::Value;
 use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -124,49 +125,49 @@ const HOST_BUILTINS_JS: &str = r#"
 "#;
 
 /// Setup the functions the host uses to make the values of callbacks
-pub fn setup_host_builtins(context: &mut JSContext) {
+pub fn setup_host_builtins(context: &Context) {
     context
-        .evaluate_script(HOST_BUILTINS_JS, 1)
+        .evaluate_script(HOST_BUILTINS_JS)
         .expect("Failed to setup the host builtins");
 }
 
 /// Setup the registry that keeps pending callbacks reachable from JS
-pub fn setup_callback_registry(context: &mut JSContext) {
+pub fn setup_callback_registry(context: &Context) {
     context
-        .evaluate_script(CALLBACK_REGISTRY_JS, 1)
+        .evaluate_script(CALLBACK_REGISTRY_JS)
         .expect("Failed to setup the callback registry");
 }
 
 /// Call a function held by the global object
-pub(crate) fn call_global(
-    context: &JSContext,
+pub(crate) fn call_global<'c>(
+    context: &'c Context,
     name: &str,
-    args: &[JSValue],
-) -> Result<JSValue, JSValue> {
+    args: &[Value<'_>],
+) -> Result<Value<'c>, Value<'c>> {
     let function = context
-        .get_global_object()
+        .global_object()
         .get_property(context, name)
-        .ok_or_else(|| JSValue::string(context, format!("{} is missing", name)))?
+        .map_err(|_| Value::string(context, &format!("{} is missing", name)))?
         .to_object(context)?;
 
-    function.call_as_function(context, None, args)
+    function.call(context, None, args)
 }
 
 /// Hand a callback to the JS registry, which owns it until it runs or is dropped
-fn store_callback(
-    context: &JSContext,
+fn store_callback<'c>(
+    context: &'c Context,
     callback_id: CallbackId,
-    callback: JSObject,
-) -> Result<(), JSValue> {
-    let id = JSValue::number(context, callback_id as f64);
+    callback: Object<'_>,
+) -> Result<(), Value<'c>> {
+    let id = Value::number(context, callback_id as f64);
 
     call_global(context, "__storeCallback", &[id, callback.into()])?;
 
     Ok(())
 }
 
-fn drop_callback(context: &JSContext, callback_id: CallbackId) {
-    let id = JSValue::number(context, callback_id as f64);
+fn drop_callback(context: &Context, callback_id: CallbackId) {
+    let id = Value::number(context, callback_id as f64);
 
     if let Err(e) = call_global(context, "__dropCallback", &[id]) {
         log::error!(
@@ -180,41 +181,38 @@ fn drop_callback(context: &JSContext, callback_id: CallbackId) {
 /// Setup console bindings (log, info, warn, error, debug)
 ///
 /// Without an ops handle the messages go to stdout, which no runner reads.
-pub fn setup_console(context: &mut JSContext, ops: Option<OperationsHandle>) {
+pub fn setup_console(context: &Context, ops: Option<OperationsHandle>) {
     // Create native __console_log function that accepts level and message
-    let console_log_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Ok(JSValue::undefined(&ctx));
-            }
-
-            let level_num = args[0].to_number(&ctx).map(|n| n as i32).unwrap_or(2);
-            let msg = args[1]
-                .to_js_string(&ctx)
-                .map(|s| s.to_string())
-                .unwrap_or_default();
-
-            let level = match level_num {
-                0 => LogLevel::Error,
-                1 => LogLevel::Warn,
-                3 => LogLevel::Debug,
-                _ => LogLevel::Info,
-            };
-
-            // Called straight from JS, or else a script that never yields to the
-            // event loop would end before its logs were delivered
-            match &ops {
-                Some(ops) => ops.handle_log(level, msg),
-                None => println!("[{}] {}", level, msg),
-            }
-
-            Ok(JSValue::undefined(&ctx))
+    let console_log_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Ok(Value::undefined(ctx));
         }
-    );
+
+        let level_num = args[0].to_number(ctx).map(|n| n as i32).unwrap_or(2);
+        let msg = args[1]
+            .to_string(ctx)
+            .map(|s| s.to_string())
+            .unwrap_or_default();
+
+        let level = match level_num {
+            0 => LogLevel::Error,
+            1 => LogLevel::Warn,
+            3 => LogLevel::Debug,
+            _ => LogLevel::Info,
+        };
+
+        // Called straight from JS, or else a script that never yields to the
+        // event loop would end before its logs were delivered
+        match &ops {
+            Some(ops) => ops.handle_log(level, msg),
+            None => println!("[{}] {}", level, msg),
+        }
+
+        Ok(Value::undefined(ctx))
+    });
 
     // Add __console_log to global
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "__console_log", console_log_fn.into())
         .unwrap();
@@ -245,23 +243,21 @@ pub fn setup_console(context: &mut JSContext, ops: Option<OperationsHandle>) {
         };
     "#;
 
-    context.evaluate_script(console_script, 1).unwrap();
+    context.evaluate_script(console_script).unwrap();
 }
 
-#[callback]
-fn queue_microtask_fn(
-    mut ctx: JSContext,
-    _function: JSObject,
-    _this: JSObject,
-    args: &[JSValue],
-) -> Result<JSValue, JSValue> {
+fn queue_microtask_fn<'c>(
+    ctx: &'c Context,
+    _this: Object<'c>,
+    args: &[Value<'c>],
+) -> Result<Value<'c>, Value<'c>> {
     if args.is_empty() {
-        return Err(JSValue::string(&ctx, "queueMicrotask requires a function"));
+        return Err(Value::string(ctx, "queueMicrotask requires a function"));
     }
 
-    let callback = match args[0].to_object(&ctx) {
+    let callback = match args[0].to_object(ctx) {
         Ok(obj) => obj,
-        Err(_) => return Err(JSValue::string(&ctx, "Argument must be a function")),
+        Err(_) => return Err(Value::string(ctx, "Argument must be a function")),
     };
 
     // Use Promise.resolve().then() to queue as microtask
@@ -272,20 +268,20 @@ fn queue_microtask_fn(
         })
     "#;
 
-    if let Ok(wrapper) = ctx.evaluate_script(script, 1)
-        && let Ok(wrapper_fn) = wrapper.to_object(&ctx)
+    if let Ok(wrapper) = ctx.evaluate_script(script)
+        && let Ok(wrapper_fn) = wrapper.to_object(ctx)
     {
-        let _ = wrapper_fn.call_as_function(&ctx, None, &[callback.into()]);
+        let _ = wrapper_fn.call(ctx, None, &[callback.into()]);
     }
 
-    Ok(JSValue::undefined(&ctx))
+    Ok(Value::undefined(ctx))
 }
 
 /// Setup queueMicrotask binding
-pub fn setup_microtask(context: &mut JSContext) {
-    let microtask_fn = JSValue::callback(context, Some(queue_microtask_fn));
+pub fn setup_microtask(context: &Context) {
+    let microtask_fn: Value<'_> = Object::new_function(context, queue_microtask_fn).into();
 
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "queueMicrotask", microtask_fn)
         .unwrap();
@@ -293,7 +289,7 @@ pub fn setup_microtask(context: &mut JSContext) {
 
 /// Setup fetch API
 pub fn setup_fetch(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
@@ -301,72 +297,66 @@ pub fn setup_fetch(
     let next_id_clone = next_id;
 
     // Create fetch function
-    let fetch_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Err(JSValue::string(&ctx, "fetch requires a URL"));
-            }
+    let fetch_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.is_empty() {
+            return Err(Value::string(ctx, "fetch requires a URL"));
+        }
 
-            // Get URL
-            let url = match args[0].to_js_string(&ctx) {
-                Ok(url_str) => url_str.to_string(),
-                Err(_) => return Err(JSValue::string(&ctx, "URL must be a string")),
-            };
+        // Get URL
+        let url = match args[0].to_string(ctx) {
+            Ok(url_str) => url_str.to_string(),
+            Err(_) => return Err(Value::string(ctx, "URL must be a string")),
+        };
 
-            // Parse fetch options (method, headers, body)
-            let options_val = if args.len() > 1 {
-                Some(args[1].clone())
-            } else {
-                None
-            };
+        // Parse fetch options (method, headers, body)
+        let options_val = if args.len() > 1 { Some(args[1]) } else { None };
 
-            let request = match super::fetch::parse_fetch_options(&ctx, url, options_val) {
-                Ok(req) => req,
-                Err(e) => return Err(JSValue::string(&ctx, e.as_str())),
-            };
+        let request = match super::fetch::parse_fetch_options(ctx, url, options_val) {
+            Ok(req) => req,
+            Err(e) => return Err(Value::string(ctx, e.as_str())),
+        };
 
-            // One callback settles the Promise, and a network error arrives as
-            // an Error, which has to reject rather than resolve
-            let promise_script = r#"
+        // One callback settles the Promise, and a network error arrives as
+        // an Error, which has to reject rather than resolve
+        let promise_script = r#"
                 new Promise((resolve, reject) => {
                     globalThis.__fetchSettle = (value) =>
                         value instanceof Error ? reject(value) : resolve(value);
                 })
             "#;
 
-            let promise = match ctx.evaluate_script(promise_script, 1) {
-                Ok(p) => p,
-                Err(_) => return Err(JSValue::string(&ctx, "Failed to create Promise")),
-            };
+        let promise = match ctx.evaluate_script(promise_script) {
+            Ok(p) => p,
+            Err(_) => return Err(Value::string(ctx, "Failed to create Promise")),
+        };
 
-            let settle_callback = ctx
-                .get_global_object()
-                .get_property(&ctx, "__fetchSettle")
-                .and_then(|v| v.to_object(&ctx).ok())
-                .ok_or_else(|| JSValue::string(&ctx, "Failed to get settle callback"))?;
+        let settle_callback = ctx
+            .global_object()
+            .get_property(ctx, "__fetchSettle")
+            .ok()
+            .and_then(|v| v.to_object(ctx).ok())
+            .ok_or_else(|| Value::string(ctx, "Failed to get settle callback"))?;
 
-            let callback_id = next_callback_id(&next_id_clone);
+        let callback_id = next_callback_id(&next_id_clone);
 
-            store_callback(&ctx, callback_id, settle_callback)?;
+        store_callback(ctx, callback_id, settle_callback)?;
 
-            log::debug!(
-                "fetch: scheduled streaming {} {} (promise_id: {})",
-                request.method.as_str(),
-                request.url,
-                callback_id
-            );
+        log::debug!(
+            "fetch: scheduled streaming {} {} (promise_id: {})",
+            request.method.as_str(),
+            request.url,
+            callback_id
+        );
 
-            // Schedule the fetch with streaming
-            let _ = scheduler_tx_clone.send(SchedulerMessage::FetchStreaming(callback_id, request));
+        // Schedule the fetch with streaming
+        let _ = scheduler_tx_clone.send(SchedulerMessage::FetchStreaming(callback_id, request));
 
-            // Return the Promise
-            Ok(promise)
-        }
-    );
+        // Return the Promise
+        Ok(promise)
+    });
 
     // Add native fetch to global object (as __nativeFetch)
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "__nativeFetch", fetch_fn.into())
         .unwrap();
@@ -419,13 +409,13 @@ pub fn setup_fetch(
     "#;
 
     context
-        .evaluate_script(wrapper_code, 1)
+        .evaluate_script(wrapper_code)
         .expect("Failed to setup fetch wrapper");
 }
 
 /// Setup timer bindings (setTimeout, setInterval, clearTimeout, clearInterval)
 pub fn setup_timer(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
@@ -441,53 +431,50 @@ pub fn setup_timer(
 
 /// Setup setTimeout binding
 fn setup_set_timeout(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
     let next_id_clone = next_id;
     let scheduler_tx_clone = scheduler_tx;
 
-    // Create setTimeout function using callback_closure to capture Rust state
-    let set_timeout = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(&ctx, "setTimeout requires 2 arguments"));
-            }
-
-            // Get the callback function
-            let callback = match args[0].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "First argument must be a function")),
-            };
-
-            // Get the delay
-            let delay = match args[1].to_number(&ctx) {
-                Ok(d) => d as u64,
-                Err(_) => return Err(JSValue::string(&ctx, "Second argument must be a number")),
-            };
-
-            let callback_id = next_callback_id(&next_id_clone);
-
-            store_callback(&ctx, callback_id, callback)?;
-
-            // Schedule the timeout
-            let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleTimeout(callback_id, delay));
-
-            log::debug!(
-                "setTimeout: registered callback {} with delay {}ms",
-                callback_id,
-                delay
-            );
-
-            // Return the timeout ID
-            Ok(JSValue::number(&ctx, callback_id as f64))
+    // Create setTimeout function as a closure, to capture Rust state
+    let set_timeout = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(ctx, "setTimeout requires 2 arguments"));
         }
-    );
+
+        // Get the callback function
+        let callback = match args[0].to_object(ctx) {
+            Ok(obj) => obj,
+            Err(_) => return Err(Value::string(ctx, "First argument must be a function")),
+        };
+
+        // Get the delay
+        let delay = match args[1].to_number(ctx) {
+            Ok(d) => d as u64,
+            Err(_) => return Err(Value::string(ctx, "Second argument must be a number")),
+        };
+
+        let callback_id = next_callback_id(&next_id_clone);
+
+        store_callback(ctx, callback_id, callback)?;
+
+        // Schedule the timeout
+        let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleTimeout(callback_id, delay));
+
+        log::debug!(
+            "setTimeout: registered callback {} with delay {}ms",
+            callback_id,
+            delay
+        );
+
+        // Return the timeout ID
+        Ok(Value::number(ctx, callback_id as f64))
+    });
 
     // Add setTimeout to global object
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "setTimeout", set_timeout.into())
         .unwrap();
@@ -495,7 +482,7 @@ fn setup_set_timeout(
 
 /// Setup setInterval binding
 fn setup_set_interval(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
@@ -503,113 +490,100 @@ fn setup_set_interval(
     let scheduler_tx_clone = scheduler_tx;
 
     // Create setInterval function
-    let set_interval = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(&ctx, "setInterval requires 2 arguments"));
-            }
-
-            // Get the callback function
-            let callback = match args[0].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "First argument must be a function")),
-            };
-
-            // Get the interval
-            let interval = match args[1].to_number(&ctx) {
-                Ok(d) => d as u64,
-                Err(_) => return Err(JSValue::string(&ctx, "Second argument must be a number")),
-            };
-
-            let callback_id = next_callback_id(&next_id_clone);
-
-            store_callback(&ctx, callback_id, callback)?;
-
-            // Schedule the interval
-            let _ =
-                scheduler_tx_clone.send(SchedulerMessage::ScheduleInterval(callback_id, interval));
-
-            log::debug!(
-                "setInterval: registered callback {} with interval {}ms",
-                callback_id,
-                interval
-            );
-
-            // Return the interval ID
-            Ok(JSValue::number(&ctx, callback_id as f64))
+    let set_interval = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(ctx, "setInterval requires 2 arguments"));
         }
-    );
+
+        // Get the callback function
+        let callback = match args[0].to_object(ctx) {
+            Ok(obj) => obj,
+            Err(_) => return Err(Value::string(ctx, "First argument must be a function")),
+        };
+
+        // Get the interval
+        let interval = match args[1].to_number(ctx) {
+            Ok(d) => d as u64,
+            Err(_) => return Err(Value::string(ctx, "Second argument must be a number")),
+        };
+
+        let callback_id = next_callback_id(&next_id_clone);
+
+        store_callback(ctx, callback_id, callback)?;
+
+        // Schedule the interval
+        let _ = scheduler_tx_clone.send(SchedulerMessage::ScheduleInterval(callback_id, interval));
+
+        log::debug!(
+            "setInterval: registered callback {} with interval {}ms",
+            callback_id,
+            interval
+        );
+
+        // Return the interval ID
+        Ok(Value::number(ctx, callback_id as f64))
+    });
 
     // Add setInterval to global object
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "setInterval", set_interval.into())
         .unwrap();
 }
 
 /// Setup clearTimeout and clearInterval bindings (same implementation for both)
-fn setup_clear_timer(
-    context: &mut JSContext,
-    scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
-) {
+fn setup_clear_timer(context: &Context, scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>) {
     let scheduler_tx_clone = scheduler_tx.clone();
 
     // Create clearTimeout function
-    let clear_timeout = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Ok(JSValue::undefined(&ctx));
-            }
-
-            // Get the timer ID
-            let timer_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as u64,
-                Err(_) => return Ok(JSValue::undefined(&ctx)),
-            };
-
-            // Drop the stored callback, or else it leaks until worker teardown
-            drop_callback(&ctx, timer_id);
-
-            // Send clear message
-            let _ = scheduler_tx_clone.send(SchedulerMessage::ClearTimer(timer_id));
-
-            log::debug!("clearTimeout: cleared timer {}", timer_id);
-
-            Ok(JSValue::undefined(&ctx))
+    let clear_timeout = Object::new_function(context, move |ctx, _this, args| {
+        if args.is_empty() {
+            return Ok(Value::undefined(ctx));
         }
-    );
+
+        // Get the timer ID
+        let timer_id = match args[0].to_number(ctx) {
+            Ok(id) => id as u64,
+            Err(_) => return Ok(Value::undefined(ctx)),
+        };
+
+        // Drop the stored callback, or else it leaks until worker teardown
+        drop_callback(ctx, timer_id);
+
+        // Send clear message
+        let _ = scheduler_tx_clone.send(SchedulerMessage::ClearTimer(timer_id));
+
+        log::debug!("clearTimeout: cleared timer {}", timer_id);
+
+        Ok(Value::undefined(ctx))
+    });
 
     let scheduler_tx_clone2 = scheduler_tx;
 
     // Create clearInterval function (same implementation)
-    let clear_interval = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Ok(JSValue::undefined(&ctx));
-            }
-
-            // Get the timer ID
-            let timer_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as u64,
-                Err(_) => return Ok(JSValue::undefined(&ctx)),
-            };
-
-            drop_callback(&ctx, timer_id);
-
-            // Send clear message
-            let _ = scheduler_tx_clone2.send(SchedulerMessage::ClearTimer(timer_id));
-
-            log::debug!("clearInterval: cleared timer {}", timer_id);
-
-            Ok(JSValue::undefined(&ctx))
+    let clear_interval = Object::new_function(context, move |ctx, _this, args| {
+        if args.is_empty() {
+            return Ok(Value::undefined(ctx));
         }
-    );
+
+        // Get the timer ID
+        let timer_id = match args[0].to_number(ctx) {
+            Ok(id) => id as u64,
+            Err(_) => return Ok(Value::undefined(ctx)),
+        };
+
+        drop_callback(ctx, timer_id);
+
+        // Send clear message
+        let _ = scheduler_tx_clone2.send(SchedulerMessage::ClearTimer(timer_id));
+
+        log::debug!("clearInterval: cleared timer {}", timer_id);
+
+        Ok(Value::undefined(ctx))
+    });
 
     // Add to global object
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "clearTimeout", clear_timeout.into())
         .unwrap();
@@ -620,7 +594,7 @@ fn setup_clear_timer(
 
 /// Setup stream operations for native streaming (__nativeStreamRead, __nativeStreamCancel)
 pub fn setup_stream_ops(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
@@ -629,75 +603,69 @@ pub fn setup_stream_ops(
     let scheduler_tx_clone = scheduler_tx.clone();
     let next_id_clone = next_id;
 
-    let stream_read = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "__nativeStreamRead requires stream_id and callback",
-                ));
-            }
-
-            // Get stream ID
-            let stream_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as StreamId,
-                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
-            };
-
-            // Get callback function
-            let callback = match args[1].to_object(&ctx) {
-                Ok(obj) => obj,
-                Err(_) => return Err(JSValue::string(&ctx, "callback must be a function")),
-            };
-
-            let callback_id = next_callback_id(&next_id_clone);
-
-            store_callback(&ctx, callback_id, callback)?;
-
-            // Send StreamRead message to scheduler
-            let _ = scheduler_tx_clone.send(SchedulerMessage::StreamRead(callback_id, stream_id));
-
-            log::debug!(
-                "__nativeStreamRead: reading stream {} (callback {})",
-                stream_id,
-                callback_id
-            );
-
-            Ok(JSValue::undefined(&ctx))
+    let stream_read = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(
+                ctx,
+                "__nativeStreamRead requires stream_id and callback",
+            ));
         }
-    );
+
+        // Get stream ID
+        let stream_id = match args[0].to_number(ctx) {
+            Ok(id) => id as StreamId,
+            Err(_) => return Err(Value::string(ctx, "stream_id must be a number")),
+        };
+
+        // Get callback function
+        let callback = match args[1].to_object(ctx) {
+            Ok(obj) => obj,
+            Err(_) => return Err(Value::string(ctx, "callback must be a function")),
+        };
+
+        let callback_id = next_callback_id(&next_id_clone);
+
+        store_callback(ctx, callback_id, callback)?;
+
+        // Send StreamRead message to scheduler
+        let _ = scheduler_tx_clone.send(SchedulerMessage::StreamRead(callback_id, stream_id));
+
+        log::debug!(
+            "__nativeStreamRead: reading stream {} (callback {})",
+            stream_id,
+            callback_id
+        );
+
+        Ok(Value::undefined(ctx))
+    });
 
     // Create __nativeStreamCancel(stream_id) - sends cancel message to scheduler
     let scheduler_tx_clone2 = scheduler_tx;
 
-    let stream_cancel = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Err(JSValue::string(
-                    &ctx,
-                    "__nativeStreamCancel requires stream_id",
-                ));
-            }
-
-            // Get stream ID
-            let stream_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as StreamId,
-                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
-            };
-
-            // Send StreamCancel message
-            let _ = scheduler_tx_clone2.send(SchedulerMessage::StreamCancel(stream_id));
-
-            log::debug!("__nativeStreamCancel: cancelled stream {}", stream_id);
-
-            Ok(JSValue::undefined(&ctx))
+    let stream_cancel = Object::new_function(context, move |ctx, _this, args| {
+        if args.is_empty() {
+            return Err(Value::string(
+                ctx,
+                "__nativeStreamCancel requires stream_id",
+            ));
         }
-    );
+
+        // Get stream ID
+        let stream_id = match args[0].to_number(ctx) {
+            Ok(id) => id as StreamId,
+            Err(_) => return Err(Value::string(ctx, "stream_id must be a number")),
+        };
+
+        // Send StreamCancel message
+        let _ = scheduler_tx_clone2.send(SchedulerMessage::StreamCancel(stream_id));
+
+        log::debug!("__nativeStreamCancel: cancelled stream {}", stream_id);
+
+        Ok(Value::undefined(ctx))
+    });
 
     // Add to global object
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "__nativeStreamRead", stream_read.into())
         .unwrap();
@@ -736,7 +704,7 @@ pub fn setup_stream_ops(
     "#;
 
     context
-        .evaluate_script(create_native_stream_script, 1)
+        .evaluate_script(create_native_stream_script)
         .expect("Failed to setup __createNativeStream");
 }
 
@@ -746,119 +714,104 @@ pub fn setup_stream_ops(
 /// __responseStreamError(stream_id, message) - hands the reader an error, false when full
 /// __responseStreamEnd(stream_id) - signals end of stream
 pub fn setup_response_stream_ops(
-    context: &mut JSContext,
+    context: &Context,
     stream_manager: Arc<super::stream_manager::StreamManager>,
 ) {
     // __responseStreamCreate() -> stream_id
     let manager_clone = stream_manager.clone();
-    let create_stream = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, _args: &[JSValue]| {
-            let stream_id = manager_clone.create_stream("response".to_string());
-            log::debug!("__responseStreamCreate: created stream {}", stream_id);
-            Ok(JSValue::number(&ctx, stream_id as f64))
-        }
-    );
+    let create_stream = Object::new_function(context, move |ctx, _this, _args| {
+        let stream_id = manager_clone.create_stream("response".to_string());
+        log::debug!("__responseStreamCreate: created stream {}", stream_id);
+        Ok(Value::number(ctx, stream_id as f64))
+    });
 
     // __responseStreamWrite(stream_id, Uint8Array) -> boolean
     let manager_clone = stream_manager.clone();
-    let write_stream = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "__responseStreamWrite requires stream_id and data",
-                ));
-            }
-
-            let stream_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as StreamId,
-                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
-            };
-
-            // Read bytes from the TypedArray
-            let bytes = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "data must be a Uint8Array")),
-            };
-
-            // A full buffer is the reader being slow, which the caller can wait out;
-            // a closed one has nobody left to write to
-            match manager_clone
-                .try_write_chunk(stream_id, super::stream_manager::StreamChunk::Data(bytes))
-            {
-                Ok(()) => Ok(JSValue::boolean(&ctx, true)),
-                Err(TryWriteError::Full) => Ok(JSValue::boolean(&ctx, false)),
-                Err(TryWriteError::Closed) => Err(JSValue::string(
-                    &ctx,
-                    format!("response stream {} is closed", stream_id),
-                )),
-            }
+    let write_stream = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(
+                ctx,
+                "__responseStreamWrite requires stream_id and data",
+            ));
         }
-    );
+
+        let stream_id = match args[0].to_number(ctx) {
+            Ok(id) => id as StreamId,
+            Err(_) => return Err(Value::string(ctx, "stream_id must be a number")),
+        };
+
+        // Read bytes from the TypedArray
+        let bytes = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "data must be a Uint8Array")),
+        };
+
+        // A full buffer is the reader being slow, which the caller can wait out;
+        // a closed one has nobody left to write to
+        match manager_clone
+            .try_write_chunk(stream_id, super::stream_manager::StreamChunk::Data(bytes))
+        {
+            Ok(()) => Ok(Value::boolean(ctx, true)),
+            Err(TryWriteError::Full) => Ok(Value::boolean(ctx, false)),
+            Err(TryWriteError::Closed) => Err(Value::string(
+                ctx,
+                &format!("response stream {} is closed", stream_id),
+            )),
+        }
+    });
 
     // __responseStreamError(stream_id, message) -> boolean
     let manager_clone = stream_manager.clone();
-    let error_stream = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "__responseStreamError requires stream_id and message",
-                ));
-            }
-
-            let stream_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as StreamId,
-                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
-            };
-
-            let message = args[1]
-                .to_js_string(&ctx)
-                .map(|s| s.to_string())
-                .unwrap_or_else(|_| "the guest errored its response stream".to_string());
-
-            // A stream nobody reads any more has nobody to tell, so that counts as told
-            match manager_clone.try_write_chunk(
-                stream_id,
-                super::stream_manager::StreamChunk::Error(message),
-            ) {
-                Ok(()) | Err(TryWriteError::Closed) => Ok(JSValue::boolean(&ctx, true)),
-                Err(TryWriteError::Full) => Ok(JSValue::boolean(&ctx, false)),
-            }
+    let error_stream = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(
+                ctx,
+                "__responseStreamError requires stream_id and message",
+            ));
         }
-    );
+
+        let stream_id = match args[0].to_number(ctx) {
+            Ok(id) => id as StreamId,
+            Err(_) => return Err(Value::string(ctx, "stream_id must be a number")),
+        };
+
+        let message = args[1]
+            .to_string(ctx)
+            .map(|s| s.to_string())
+            .unwrap_or_else(|_| "the guest errored its response stream".to_string());
+
+        // A stream nobody reads any more has nobody to tell, so that counts as told
+        match manager_clone.try_write_chunk(
+            stream_id,
+            super::stream_manager::StreamChunk::Error(message),
+        ) {
+            Ok(()) | Err(TryWriteError::Closed) => Ok(Value::boolean(ctx, true)),
+            Err(TryWriteError::Full) => Ok(Value::boolean(ctx, false)),
+        }
+    });
 
     // __responseStreamEnd(stream_id)
     let manager_clone = stream_manager;
-    let end_stream = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.is_empty() {
-                return Err(JSValue::string(
-                    &ctx,
-                    "__responseStreamEnd requires stream_id",
-                ));
-            }
-
-            let stream_id = match args[0].to_number(&ctx) {
-                Ok(id) => id as StreamId,
-                Err(_) => return Err(JSValue::string(&ctx, "stream_id must be a number")),
-            };
-
-            // Dropping the writer ends the stream whether or not the buffer has room,
-            // and a Done chunk would need a free slot to say the same thing
-            manager_clone.finish_stream(stream_id);
-
-            log::debug!("__responseStreamEnd: ended stream {}", stream_id);
-            Ok(JSValue::undefined(&ctx))
+    let end_stream = Object::new_function(context, move |ctx, _this, args| {
+        if args.is_empty() {
+            return Err(Value::string(ctx, "__responseStreamEnd requires stream_id"));
         }
-    );
+
+        let stream_id = match args[0].to_number(ctx) {
+            Ok(id) => id as StreamId,
+            Err(_) => return Err(Value::string(ctx, "stream_id must be a number")),
+        };
+
+        // Dropping the writer ends the stream whether or not the buffer has room,
+        // and a Done chunk would need a free slot to say the same thing
+        manager_clone.finish_stream(stream_id);
+
+        log::debug!("__responseStreamEnd: ended stream {}", stream_id);
+        Ok(Value::undefined(ctx))
+    });
 
     // Add to global object
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "__responseStreamCreate", create_stream.into())
         .unwrap();
@@ -879,48 +832,45 @@ pub fn setup_response_stream_ops(
 /// BigInt) is a TypeError from JSON.stringify before anything reaches the host.
 #[cfg(feature = "invoke")]
 pub fn setup_invoke(
-    context: &mut JSContext,
+    context: &Context,
     scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     next_id: CallbackCounter,
 ) {
-    let invoke_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 4 {
-                return Err(JSValue::string(&ctx, "invoke: missing arguments"));
-            }
-
-            let text = |index: usize| {
-                args[index]
-                    .to_js_string(&ctx)
-                    .map(|s| s.to_string())
-                    .map_err(|_| JSValue::string(&ctx, "invoke: the arguments are not strings"))
-            };
-
-            let binding = text(0)?;
-            let command = text(1)?;
-            let json = text(2)?;
-
-            let settle = args[3]
-                .to_object(&ctx)
-                .map_err(|_| JSValue::string(&ctx, "invoke: the callback is not a function"))?;
-
-            let callback_id = next_callback_id(&next_id);
-
-            store_callback(&ctx, callback_id, settle)?;
-
-            let _ = scheduler_tx.send(SchedulerMessage::Invoke(
-                callback_id,
-                binding,
-                command,
-                json,
-            ));
-
-            Ok(JSValue::undefined(&ctx))
+    let invoke_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 4 {
+            return Err(Value::string(ctx, "invoke: missing arguments"));
         }
-    );
 
-    let mut global = context.get_global_object();
+        let text = |index: usize| {
+            args[index]
+                .to_string(ctx)
+                .map(|s| s.to_string())
+                .map_err(|_| Value::string(ctx, "invoke: the arguments are not strings"))
+        };
+
+        let binding = text(0)?;
+        let command = text(1)?;
+        let json = text(2)?;
+
+        let settle = args[3]
+            .to_object(ctx)
+            .map_err(|_| Value::string(ctx, "invoke: the callback is not a function"))?;
+
+        let callback_id = next_callback_id(&next_id);
+
+        store_callback(ctx, callback_id, settle)?;
+
+        let _ = scheduler_tx.send(SchedulerMessage::Invoke(
+            callback_id,
+            binding,
+            command,
+            json,
+        ));
+
+        Ok(Value::undefined(ctx))
+    });
+
+    let global = context.global_object();
 
     global
         .set_property(context, "__nativeInvoke", invoke_fn.into())
@@ -949,6 +899,6 @@ pub fn setup_invoke(
     "#;
 
     context
-        .evaluate_script(wrapper, 1)
+        .evaluate_script(wrapper)
         .expect("Failed to setup the invoke binding");
 }

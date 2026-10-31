@@ -785,6 +785,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "openworkers-jsc"
+version = "0.1.0"
+source = "git+https://github.com/openworkers/openworkers-jsc?tag=v0.1.0#ad1163426d70d2840612dc95a6a538b17df4b6ce"
+
+[[package]]
 name = "openworkers-runtime-jsc"
 version = "0.18.1"
 dependencies = [
@@ -793,10 +798,9 @@ dependencies = [
  "libc",
  "log",
  "openworkers-core",
+ "openworkers-jsc",
  "openworkers-transform",
  "ring",
- "rusty_jsc",
- "rusty_jsc_macros",
  "serde",
  "serde_json",
  "tokio",
@@ -905,12 +909,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a89322df9ebe1c1578d689c92318e070967d1042b512afbe49518723f4e6d5cd"
 
 [[package]]
-name = "pkg-config"
-version = "0.3.34"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "f6b464fbc74e149a392436b17d523f769e057cb6877f6a5c4618bc6f11800548"
-
-[[package]]
 name = "portable-atomic"
 version = "1.15.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -932,30 +930,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d83eb9bc6d8e5cf568e7a1101d60ee05e81ed50ea106026f3d18deeb046d7661"
 dependencies = [
  "zerovec",
-]
-
-[[package]]
-name = "proc-macro-error"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "da25490ff9892aab3fcf7c36f08cfb902dd3e71ca0f9f9517bea02a73a5ce38c"
-dependencies = [
- "proc-macro-error-attr",
- "proc-macro2",
- "quote",
- "syn 1.0.109",
- "version_check",
-]
-
-[[package]]
-name = "proc-macro-error-attr"
-version = "1.0.4"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "a1be40180e52ecc98ad80b184934baf3d0d29f979574e439af5a55274b35f869"
-dependencies = [
- "proc-macro2",
- "quote",
- "version_check",
 ]
 
 [[package]]
@@ -1070,34 +1044,6 @@ name = "rustversion"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "cf54715a573b99ac80df0bc206da022bcd442c974952c7b9720069370852e21f"
-
-[[package]]
-name = "rusty_jsc"
-version = "0.1.0"
-source = "git+https://github.com/wasmerio/rusty_jsc?rev=1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7#1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7"
-dependencies = [
- "rusty_jsc_macros",
- "rusty_jsc_sys",
-]
-
-[[package]]
-name = "rusty_jsc_macros"
-version = "0.1.0"
-source = "git+https://github.com/wasmerio/rusty_jsc?rev=1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7#1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7"
-dependencies = [
- "pkg-config",
- "proc-macro-error",
- "quote",
- "syn 1.0.109",
-]
-
-[[package]]
-name = "rusty_jsc_sys"
-version = "0.1.0"
-source = "git+https://github.com/wasmerio/rusty_jsc?rev=1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7#1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7"
-dependencies = [
- "pkg-config",
-]
 
 [[package]]
 name = "ryu"
@@ -1562,17 +1508,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e7df72a1be54e379864cebf04f26abb4d7ee637977f62f8ec8387233f7a27e88"
 dependencies = [
  "either",
-]
-
-[[package]]
-name = "syn"
-version = "1.0.109"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72b64191b275b66ffe2469e8af2c1cfe3bafa67b529ead792a6d0160888b4237"
-dependencies = [
- "proc-macro2",
- "quote",
- "unicode-ident",
 ]
 
 [[package]]

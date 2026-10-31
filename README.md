@@ -1,6 +1,7 @@
 # OpenWorkers Runtime JSC
 
-JavaScriptCore-based JavaScript runtime for serverless workers, built on [rusty_jsc](https://github.com/wasmerio/rusty_jsc).
+JavaScriptCore-based JavaScript runtime for serverless workers, built on
+[openworkers-jsc](https://github.com/openworkers/openworkers-jsc).
 
 ## Quick Start
 

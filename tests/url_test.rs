@@ -12,7 +12,7 @@ fn eval_result(runner: &mut TestRunner, script: &str) -> String {
         .expect("result should be readable");
 
     value
-        .to_js_string(&runner.runtime.context)
+        .to_string(&runner.runtime.context)
         .expect("result should be a string")
         .to_string()
 }
@@ -41,14 +41,14 @@ async fn test_url_parsing() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(pathname) = obj.get_property(&runner.runtime.context, "pathname")
-                    && let Ok(pathname_str) = pathname.to_js_string(&runner.runtime.context)
+                if let Ok(pathname) = obj.get_property(&runner.runtime.context, "pathname")
+                    && let Ok(pathname_str) = pathname.to_string(&runner.runtime.context)
                 {
                     assert_eq!(pathname_str.to_string(), "/path");
                 }
 
-                if let Some(search) = obj.get_property(&runner.runtime.context, "search")
-                    && let Ok(search_str) = search.to_js_string(&runner.runtime.context)
+                if let Ok(search) = obj.get_property(&runner.runtime.context, "search")
+                    && let Ok(search_str) = search.to_string(&runner.runtime.context)
                 {
                     assert_eq!(search_str.to_string(), "?foo=bar");
                 }
@@ -81,17 +81,17 @@ async fn test_url_search_params() {
     match runner.runtime.evaluate(check) {
         Ok(result) => {
             if let Ok(obj) = result.to_object(&runner.runtime.context) {
-                if let Some(has_foo) = obj.get_property(&runner.runtime.context, "hasFoo") {
-                    assert!(has_foo.to_bool(&runner.runtime.context));
+                if let Ok(has_foo) = obj.get_property(&runner.runtime.context, "hasFoo") {
+                    assert!(has_foo.to_boolean(&runner.runtime.context));
                 }
 
-                if let Some(foo_val) = obj.get_property(&runner.runtime.context, "foo")
-                    && let Ok(foo_str) = foo_val.to_js_string(&runner.runtime.context)
+                if let Ok(foo_val) = obj.get_property(&runner.runtime.context, "foo")
+                    && let Ok(foo_str) = foo_val.to_string(&runner.runtime.context)
                 {
                     assert_eq!(foo_str.to_string(), "bar");
                 }
 
-                if let Some(missing) = obj.get_property(&runner.runtime.context, "missing") {
+                if let Ok(missing) = obj.get_property(&runner.runtime.context, "missing") {
                     assert!(missing.is_null(&runner.runtime.context));
                 }
             }
@@ -116,7 +116,7 @@ async fn test_url_in_worker_context() {
     let check = r#"globalThis.pathname"#;
     match runner.runtime.evaluate(check) {
         Ok(result) => {
-            if let Ok(pathname) = result.to_js_string(&runner.runtime.context) {
+            if let Ok(pathname) = result.to_string(&runner.runtime.context) {
                 assert_eq!(pathname.to_string(), "/users/123");
             }
         }

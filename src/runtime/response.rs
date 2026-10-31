@@ -1,7 +1,7 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup global Response class with streaming body support
-pub fn setup_response(context: &mut JSContext) {
+pub fn setup_response(context: &Context) {
     let code = r#"
         globalThis.Response = class Response {
             constructor(body, init) {
@@ -266,6 +266,6 @@ pub fn setup_response(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup Response");
 }

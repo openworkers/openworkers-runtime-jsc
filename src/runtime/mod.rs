@@ -9,6 +9,7 @@ mod response;
 pub mod stream_manager;
 mod streams;
 mod text_encoding;
+
 mod url;
 
 // Re-export fetch functions for internal use
@@ -16,7 +17,10 @@ pub use fetch::parse_fetch_options;
 
 use crate::cpu_limit::CpuLimit;
 use openworkers_core::{HttpRequest, HttpResponseMeta, TerminationReason};
-use rusty_jsc::{JSContext, JSObject, JSValue};
+use openworkers_jsc::Context;
+use openworkers_jsc::Object;
+use openworkers_jsc::TypedArrayType;
+use openworkers_jsc::Value;
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -26,79 +30,54 @@ use tokio::sync::mpsc;
 pub type CallbackId = u64;
 
 /// Read a thrown value, which itself may throw
-pub(crate) fn error_text(context: &JSContext, error: &JSValue) -> String {
-    match error.to_js_string(context) {
-        Ok(text) => text.to_string(),
-        Err(_) => "unknown error".to_string(),
-    }
+pub(crate) fn error_text(context: &Context, error: &Value<'_>) -> String {
+    error
+        .to_string(context)
+        .unwrap_or_else(|_| "unknown error".to_string())
 }
 
 /// Copy out the bytes of an ArrayBuffer or of any typed array view,
 /// or None for a value that holds no buffer
-pub(crate) fn typed_array_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes> {
-    use rusty_jsc::private;
-
-    let mut exception: private::JSValueRef = std::ptr::null_mut();
-
-    let kind = unsafe {
-        private::JSValueGetTypedArrayType(context.get_ref(), value.get_ref(), &mut exception)
-    };
-
-    if kind == private::JSTypedArrayType_kJSTypedArrayTypeNone {
+pub(crate) fn typed_array_bytes(context: &Context, value: &Value<'_>) -> Option<bytes::Bytes> {
+    let Some(kind) = value.typed_array_type(context) else {
         return data_view_bytes(context, value);
-    }
+    };
 
     let object = value.to_object(context).ok()?;
 
-    if kind == private::JSTypedArrayType_kJSTypedArrayTypeArrayBuffer {
-        return object
-            .get_array_buffer(context)
-            .ok()
-            .map(|buffer| bytes::Bytes::copy_from_slice(buffer));
-    }
-
-    let object = rusty_jsc::private::JSObjectRef::from(object.clone());
-
-    // The pointer is the start of the backing buffer, so a view has to be
-    // taken from its own offset, or else it reads the wrong bytes
+    // SAFETY: the bytes are copied before any other call into JSC
     let bytes = unsafe {
-        let start =
-            private::JSObjectGetTypedArrayBytesPtr(context.get_ref(), object, &mut exception)
-                as *const u8;
-
-        if start.is_null() {
-            return None;
+        match kind {
+            TypedArrayType::ArrayBuffer => object.array_buffer_bytes(context),
+            _ => object.typed_array_bytes(context),
         }
-
-        let offset =
-            private::JSObjectGetTypedArrayByteOffset(context.get_ref(), object, &mut exception);
-        let length =
-            private::JSObjectGetTypedArrayByteLength(context.get_ref(), object, &mut exception);
-
-        std::slice::from_raw_parts(start.add(offset as usize), length as usize)
     };
 
-    Some(bytes::Bytes::copy_from_slice(bytes))
+    bytes.ok().map(|bytes| bytes::Bytes::copy_from_slice(bytes))
 }
 
 /// JSC reports no typed array type for a DataView, so read it through its own
 /// properties; anything else lacks them and falls out as None
-fn data_view_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes> {
+fn data_view_bytes(context: &Context, value: &Value<'_>) -> Option<bytes::Bytes> {
     let view = value.to_object(context).ok()?;
     let buffer = view
-        .get_property(context, "buffer")?
+        .get_property(context, "buffer")
+        .ok()?
         .to_object(context)
         .ok()?;
     let offset = view
-        .get_property(context, "byteOffset")?
+        .get_property(context, "byteOffset")
+        .ok()?
         .to_number(context)
         .ok()? as usize;
     let length = view
-        .get_property(context, "byteLength")?
+        .get_property(context, "byteLength")
+        .ok()?
         .to_number(context)
         .ok()? as usize;
 
-    let bytes = buffer.get_array_buffer(context).ok()?;
+    // SAFETY: the bytes are copied before any other call into JSC
+    let bytes = unsafe { buffer.array_buffer_bytes(context) }.ok()?;
     let end = offset.checked_add(length)?;
 
     bytes.get(offset..end).map(bytes::Bytes::copy_from_slice)
@@ -106,39 +85,11 @@ fn data_view_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes>
 
 /// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`. It runs
 /// no JavaScript, so a Uint8Array that the guest replaced is not called.
-pub(crate) fn new_uint8_array(context: &mut JSContext, bytes: &[u8]) -> Result<JSValue, JSValue> {
-    use rusty_jsc::private;
-
-    let mut exception: private::JSValueRef = std::ptr::null_mut();
-
-    // SAFETY: the context is live
-    let array = unsafe {
-        private::JSObjectMakeTypedArray(
-            context.get_ref(),
-            private::JSTypedArrayType_kJSTypedArrayTypeUint8Array,
-            bytes.len() as u64,
-            &mut exception,
-        )
-    };
-
-    if array.is_null() || !exception.is_null() {
-        return Err(match exception.is_null() {
-            true => JSValue::undefined(context),
-            false => JSValue::from(exception),
-        });
-    }
-
-    let array_obj: JSObject = JSObject::from(array);
-
-    if bytes.is_empty() {
-        return Ok(array_obj.into());
-    }
-
-    // SAFETY: the pointer stays valid as long as no JSC call runs, and none does here
-    let buffer = unsafe { array_obj.get_typed_array_buffer(context)? };
-    buffer.copy_from_slice(bytes);
-
-    Ok(array_obj.into())
+pub(crate) fn new_uint8_array<'c>(
+    context: &'c Context,
+    bytes: &[u8],
+) -> Result<Value<'c>, Value<'c>> {
+    Object::new_uint8_array(context, bytes).map(Value::from)
 }
 
 /// Message sent from JS to schedule async operations
@@ -181,10 +132,10 @@ pub enum CallbackMessage {
     InvokeSettled(CallbackId, Result<String, String>),
 }
 
-/// Runtime that manages JSContext and tokio event loop
+/// Runtime that manages Context and tokio event loop
 pub struct Runtime {
     /// JavaScript context
-    pub context: JSContext,
+    pub context: Context,
     /// Channel to send scheduler messages to the event loop
     pub scheduler_tx: mpsc::UnboundedSender<SchedulerMessage>,
     /// Channel to receive callback messages from the event loop
@@ -208,58 +159,58 @@ impl Runtime {
         let next_callback_id: bindings::CallbackCounter = Rc::new(std::cell::Cell::new(1));
         let stream_manager = Arc::new(stream_manager::StreamManager::new());
 
-        let mut context = JSContext::default();
+        let context = Context::new();
 
         // Setup the registry every pending callback is stored in
-        bindings::setup_callback_registry(&mut context);
+        bindings::setup_callback_registry(&context);
 
         // Setup queueMicrotask
-        bindings::setup_microtask(&mut context);
+        bindings::setup_microtask(&context);
 
         // Setup TextEncoder/TextDecoder
-        text_encoding::setup_text_encoding(&mut context);
+        text_encoding::setup_text_encoding(&context);
 
         // Setup atob/btoa (depends on TextEncoder/TextDecoder)
-        base64::setup_base64(&mut context);
+        base64::setup_base64(&context);
 
         // Setup ReadableStream
-        streams::setup_readable_stream(&mut context);
+        streams::setup_readable_stream(&context);
 
         // Setup Headers (before Response)
-        headers::setup_headers(&mut context);
+        headers::setup_headers(&context);
 
         // Setup FormData (used by Request/Response body decoding)
-        form_data::setup_form_data(&mut context);
+        form_data::setup_form_data(&context);
 
         // Setup Response (uses ReadableStream and Headers)
-        response::setup_response(&mut context);
+        response::setup_response(&context);
 
         // Setup Request (uses ReadableStream, Headers, TextEncoder)
-        request::setup_request(&mut context);
+        request::setup_request(&context);
 
         // Setup URL API
-        url::setup_url_api(&mut context);
+        url::setup_url_api(&context);
 
         // Setup crypto API
-        crypto::setup_crypto(&mut context);
+        crypto::setup_crypto(&context);
 
         // Setup fetch API
-        bindings::setup_fetch(&mut context, scheduler_tx.clone(), next_callback_id.clone());
+        bindings::setup_fetch(&context, scheduler_tx.clone(), next_callback_id.clone());
 
         // Setup timer bindings (pass shared state)
-        bindings::setup_timer(&mut context, scheduler_tx.clone(), next_callback_id.clone());
+        bindings::setup_timer(&context, scheduler_tx.clone(), next_callback_id.clone());
 
         #[cfg(feature = "invoke")]
-        bindings::setup_invoke(&mut context, scheduler_tx.clone(), next_callback_id.clone());
+        bindings::setup_invoke(&context, scheduler_tx.clone(), next_callback_id.clone());
 
         // Setup stream operations for native streaming
-        bindings::setup_stream_ops(&mut context, scheduler_tx.clone(), next_callback_id);
+        bindings::setup_stream_ops(&context, scheduler_tx.clone(), next_callback_id);
 
         // Setup response stream operations for streaming all responses
-        bindings::setup_response_stream_ops(&mut context, stream_manager.clone());
+        bindings::setup_response_stream_ops(&context, stream_manager.clone());
 
         // Last, so it holds the builtins made above, and before guest code
-        bindings::setup_host_builtins(&mut context);
+        bindings::setup_host_builtins(&context);
 
         let cpu = CpuLimit::new(&context, 0).expect("no limit always works");
 
@@ -285,7 +236,7 @@ impl Runtime {
 
     /// Runs the callback of one message. An error means the CPU budget is
     /// spent: the event must end.
-    pub fn handle_callback(&mut self, msg: CallbackMessage) -> Result<(), TerminationReason> {
+    pub fn handle_callback(&self, msg: CallbackMessage) -> Result<(), TerminationReason> {
         let context = &self.context;
 
         let (runner, callback_id, made) = match msg {
@@ -297,7 +248,7 @@ impl Runtime {
                 ("__runRepeatingCallback", callback_id, Ok(vec![]))
             }
             CallbackMessage::FetchError(callback_id, message) => {
-                let message = JSValue::string(context, message.as_str());
+                let message = Value::string(context, message.as_str());
                 let error = self.call("__hostTypeError", &[message])?;
 
                 ("__runCallback", callback_id, error.map(|e| vec![e]))
@@ -313,8 +264,8 @@ impl Runtime {
                     Ok(json) => (true, json),
                     Err(message) => (false, message),
                 };
-                let ok = JSValue::boolean(context, ok);
-                let payload = JSValue::string(context, payload.as_str());
+                let ok = Value::boolean(context, ok);
+                let payload = Value::string(context, payload.as_str());
 
                 ("__runCallback", callback_id, Ok(vec![ok, payload]))
             }
@@ -340,7 +291,7 @@ impl Runtime {
 
         log::debug!("Executing callback {}", callback_id);
 
-        let mut call_args = vec![JSValue::number(&self.context, callback_id as f64)];
+        let mut call_args = vec![Value::number(&self.context, callback_id as f64)];
         call_args.extend(args);
 
         if let Err(e) = self.call(runner, &call_args)? {
@@ -358,58 +309,58 @@ impl Runtime {
     pub(crate) fn call(
         &self,
         name: &str,
-        args: &[JSValue],
-    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
+        args: &[Value],
+    ) -> Result<Result<Value<'_>, Value<'_>>, TerminationReason> {
         self.cpu
             .run(|| bindings::call_global(&self.context, name, args))
     }
 
     /// The text of a value of the guest, such as a thrown one. Reading it can
     /// run guest code (toString), so it is a call under the CPU budget too.
-    pub(crate) fn value_text(&self, error: &JSValue) -> Result<String, TerminationReason> {
+    pub(crate) fn value_text(&self, error: &Value<'_>) -> Result<String, TerminationReason> {
         self.cpu.run(|| error_text(&self.context, error))
     }
 
     /// Evaluate a JavaScript script, with no CPU budget
-    pub fn evaluate(&mut self, script: &str) -> Result<JSValue, JSValue> {
-        self.context.evaluate_script(script, 1)
+    pub fn evaluate(&self, script: &str) -> Result<Value<'_>, Value<'_>> {
+        self.context.evaluate_script(script)
     }
 
     fn make_response(
-        &mut self,
+        &self,
         meta: &HttpResponseMeta,
         stream_id: stream_manager::StreamId,
-    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
+    ) -> Result<Result<Value<'_>, Value<'_>>, TerminationReason> {
         let headers_json = serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
         let context = &self.context;
         let args = [
-            JSValue::number(context, stream_id as f64),
-            JSValue::number(context, meta.status as f64),
-            JSValue::string(context, meta.status_text.as_str()),
-            JSValue::string(context, headers_json.as_str()),
+            Value::number(context, stream_id as f64),
+            Value::number(context, meta.status as f64),
+            Value::string(context, meta.status_text.as_str()),
+            Value::string(context, headers_json.as_str()),
         ];
 
         self.call("__hostResponse", &args)
     }
 
     fn make_chunk_result(
-        &mut self,
+        &self,
         chunk: stream_manager::StreamChunk,
-    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
+    ) -> Result<Result<Value<'_>, Value<'_>>, TerminationReason> {
         let args = match chunk {
             stream_manager::StreamChunk::Data(bytes) => {
-                match new_uint8_array(&mut self.context, &bytes) {
-                    Ok(value) => [JSValue::string(&self.context, "data"), value],
+                match new_uint8_array(&self.context, &bytes) {
+                    Ok(value) => [Value::string(&self.context, "data"), value],
                     Err(e) => return Ok(Err(e)),
                 }
             }
             stream_manager::StreamChunk::Done => [
-                JSValue::string(&self.context, "done"),
-                JSValue::undefined(&self.context),
+                Value::string(&self.context, "done"),
+                Value::undefined(&self.context),
             ],
             stream_manager::StreamChunk::Error(err) => [
-                JSValue::string(&self.context, "error"),
-                JSValue::string(&self.context, err.as_str()),
+                Value::string(&self.context, "error"),
+                Value::string(&self.context, err.as_str()),
             ],
         };
 

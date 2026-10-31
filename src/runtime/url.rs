@@ -1,5 +1,6 @@
-use rusty_jsc::JSContext;
-use rusty_jsc::JSValue;
+use openworkers_jsc::Context;
+use openworkers_jsc::Object;
+use openworkers_jsc::Value;
 use url::Url;
 
 /// Serialize the WHATWG components JS reads back from the parser
@@ -100,57 +101,51 @@ fn apply(url: &mut Url, part: &str, value: &str) {
     }
 }
 
-fn string_arg(ctx: &JSContext, args: &[JSValue], index: usize) -> Option<String> {
+fn string_arg(ctx: &Context, args: &[Value], index: usize) -> Option<String> {
     let value = args.get(index)?;
 
     if value.is_null(ctx) || value.is_undefined(ctx) {
         return None;
     }
 
-    value.to_js_string(ctx).ok().map(|s| s.to_string())
+    value.to_string(ctx).ok().map(|s| s.to_string())
 }
 
 /// Setup URL and URLSearchParams APIs
-pub fn setup_url_api(context: &mut JSContext) {
-    let parse_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            let input = match string_arg(&ctx, args, 0) {
-                Some(input) => input,
-                None => return Ok(JSValue::null(&ctx)),
-            };
+pub fn setup_url_api(context: &Context) {
+    let parse_fn = Object::new_function(context, move |ctx, _this, args| {
+        let input = match string_arg(ctx, args, 0) {
+            Some(input) => input,
+            None => return Ok(Value::null(ctx)),
+        };
 
-            let base = string_arg(&ctx, args, 1);
+        let base = string_arg(ctx, args, 1);
 
-            match parse(&input, base.as_deref()) {
-                Some(url) => Ok(JSValue::string(&ctx, parts_json(&url).as_str())),
-                None => Ok(JSValue::null(&ctx)),
-            }
+        match parse(&input, base.as_deref()) {
+            Some(url) => Ok(Value::string(ctx, parts_json(&url).as_str())),
+            None => Ok(Value::null(ctx)),
         }
-    );
+    });
 
-    let update_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            let href = string_arg(&ctx, args, 0);
-            let part = string_arg(&ctx, args, 1);
-            let value = string_arg(&ctx, args, 2).unwrap_or_default();
+    let update_fn = Object::new_function(context, move |ctx, _this, args| {
+        let href = string_arg(ctx, args, 0);
+        let part = string_arg(ctx, args, 1);
+        let value = string_arg(ctx, args, 2).unwrap_or_default();
 
-            let mut url = match href.as_deref().and_then(|href| parse(href, None)) {
-                Some(url) => url,
-                None => return Ok(JSValue::null(&ctx)),
-            };
+        let mut url = match href.as_deref().and_then(|href| parse(href, None)) {
+            Some(url) => url,
+            None => return Ok(Value::null(ctx)),
+        };
 
-            match part {
-                Some(part) => apply(&mut url, &part, &value),
-                None => return Ok(JSValue::null(&ctx)),
-            }
-
-            Ok(JSValue::string(&ctx, parts_json(&url).as_str()))
+        match part {
+            Some(part) => apply(&mut url, &part, &value),
+            None => return Ok(Value::null(ctx)),
         }
-    );
 
-    let mut global = context.get_global_object();
+        Ok(Value::string(ctx, parts_json(&url).as_str()))
+    });
+
+    let global = context.global_object();
 
     global
         .set_property(context, "__urlParse", parse_fn.into())
@@ -161,7 +156,7 @@ pub fn setup_url_api(context: &mut JSContext) {
         .expect("global is writable");
 
     context
-        .evaluate_script(URL_JS, 1)
+        .evaluate_script(URL_JS)
         .expect("Failed to setup URL");
 }
 

@@ -1,7 +1,7 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup global Headers class
-pub fn setup_headers(context: &mut JSContext) {
+pub fn setup_headers(context: &Context) {
     let code = r#"
         globalThis.Headers = class Headers {
             constructor(init) {
@@ -126,6 +126,6 @@ pub fn setup_headers(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup Headers");
 }

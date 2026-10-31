@@ -4,17 +4,19 @@ version = "0.18.1"
 edition = "2024"
 
 [features]
+default = ["system"]
 # BindingType::Invoke: env.<NAME>.invoke(command, args) calls a function of the host
 invoke = ["openworkers-core/invoke"]
+# JavaScriptCore.framework of macOS
+system = ["openworkers-jsc/system"]
 
 [dependencies]
 # Common types
 # openworkers-core = { path = "../openworkers-core", features = ["testing"] }
 openworkers-core = { git = "https://github.com/openworkers/openworkers-core", tag = "v0.18.1" }
 
-# JSCore runtime (using local fork)
-rusty_jsc = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7" }
-rusty_jsc_macros = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f72bf4f3c423f8cd3e7d91e121a0c0ad50af7" }
+# JavaScriptCore
+openworkers-jsc = { git = "https://github.com/openworkers/openworkers-jsc", tag = "v0.1.0", default-features = false }
 
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }

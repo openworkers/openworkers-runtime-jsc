@@ -4,6 +4,7 @@ use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
     TaskInit, TaskResult, TaskSource, TerminationReason,
 };
+use openworkers_jsc::Object;
 use std::cell::RefCell;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -58,7 +59,7 @@ impl Worker {
         let reason = |reason: TerminationReason| format!("{reason:?}");
         let evaluated = runtime
             .cpu
-            .run(|| runtime.context.evaluate_script(script, 1))
+            .run(|| runtime.context.evaluate_script(script))
             .map_err(reason)?;
 
         match evaluated {
@@ -85,13 +86,13 @@ impl Worker {
         runtime.cpu = CpuLimit::new(&runtime.context, limits.max_cpu_time_ms)?;
 
         // Setup addEventListener binding
-        setup_event_listener(&mut runtime.context, completion.clone());
+        setup_event_listener(&runtime.context, completion.clone());
 
         // Setup environment variables
-        setup_env(&mut runtime.context, &script.env, &script.bindings);
+        setup_env(&runtime.context, &script.env, &script.bindings);
 
         // Setup console
-        crate::runtime::bindings::setup_console(&mut runtime.context, Some(ops.clone()));
+        crate::runtime::bindings::setup_console(&runtime.context, Some(ops.clone()));
 
         // Extract JavaScript code from WorkerCode
         let js_code = script.code.as_js().ok_or_else(|| {
@@ -103,7 +104,7 @@ impl Worker {
 
         let evaluated = runtime
             .cpu
-            .run(|| runtime.context.evaluate_script(js_code, 1))?;
+            .run(|| runtime.context.evaluate_script(js_code))?;
 
         if let Err(e) = evaluated {
             return Err(TerminationReason::Exception(format!(
@@ -369,20 +370,20 @@ impl Worker {
         let headers_json = serde_json::to_string(&req.headers).expect("headers are strings");
         let body = match &req.body {
             RequestBody::Bytes(bytes) if !bytes.is_empty() => {
-                crate::runtime::new_uint8_array(&mut self.runtime.context, bytes).map_err(|_| {
+                crate::runtime::new_uint8_array(&self.runtime.context, bytes).map_err(|_| {
                     TerminationReason::Exception("Failed to create Request object".to_string())
                 })?
             }
-            _ => rusty_jsc::JSValue::null(&self.runtime.context),
+            _ => openworkers_jsc::Value::null(&self.runtime.context),
         };
 
         let context = &self.runtime.context;
         let args = [
-            rusty_jsc::JSValue::string(context, req.method.as_str()),
-            rusty_jsc::JSValue::string(context, req.url.as_str()),
-            rusty_jsc::JSValue::string(context, headers_json.as_str()),
+            openworkers_jsc::Value::string(context, req.method.as_str()),
+            openworkers_jsc::Value::string(context, req.url.as_str()),
+            openworkers_jsc::Value::string(context, headers_json.as_str()),
             body,
-            rusty_jsc::JSValue::number(context, epoch as f64),
+            openworkers_jsc::Value::number(context, epoch as f64),
         ];
 
         match self.runtime.call("__triggerFetch", &args)? {
@@ -396,7 +397,7 @@ impl Worker {
     fn handler_error(
         &self,
         kind: &str,
-        error: &rusty_jsc::JSValue,
+        error: &openworkers_jsc::Value,
     ) -> Result<TerminationReason, TerminationReason> {
         let text = self.runtime.value_text(error)?;
 
@@ -407,9 +408,10 @@ impl Worker {
             let stack = error
                 .to_object(context)
                 .ok()?
-                .get_property(context, "stack")?;
+                .get_property(context, "stack")
+                .ok()?;
 
-            stack.to_js_string(context).ok().map(|s| s.to_string())
+            stack.to_string(context).ok().map(|s| s.to_string())
         })?;
 
         if let Some(stack) = stack {
@@ -524,8 +526,8 @@ impl Worker {
     fn call_task_handler(&mut self, event_json: &str, epoch: u64) -> Result<(), TerminationReason> {
         let context = &self.runtime.context;
         let args = [
-            rusty_jsc::JSValue::string(context, event_json),
-            rusty_jsc::JSValue::number(context, epoch as f64),
+            openworkers_jsc::Value::string(context, event_json),
+            openworkers_jsc::Value::number(context, epoch as f64),
         ];
 
         match self.runtime.call("__triggerTask", &args)? {
@@ -591,31 +593,25 @@ impl Drop for Worker {
 }
 
 /// Setup addEventListener binding
-fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCell<Completion>>) {
-    let complete_event_callback = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: rusty_jsc::JSContext,
-              _function: rusty_jsc::JSObject,
-              _this: rusty_jsc::JSObject,
-              args: &[rusty_jsc::JSValue]| {
-            if args.len() < 2 {
-                return Ok(rusty_jsc::JSValue::undefined(&ctx));
-            }
-
-            let epoch = args[0].to_number(&ctx).unwrap_or_default() as u64;
-
-            if let Ok(result_json) = args[1].to_js_string(&ctx) {
-                completion
-                    .borrow_mut()
-                    .complete(epoch, result_json.to_string());
-            }
-
-            Ok(rusty_jsc::JSValue::undefined(&ctx))
+fn setup_event_listener(context: &openworkers_jsc::Context, completion: Rc<RefCell<Completion>>) {
+    let complete_event_callback = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Ok(openworkers_jsc::Value::undefined(ctx));
         }
-    );
+
+        let epoch = args[0].to_number(ctx).unwrap_or_default() as u64;
+
+        if let Ok(result_json) = args[1].to_string(ctx) {
+            completion
+                .borrow_mut()
+                .complete(epoch, result_json.to_string());
+        }
+
+        Ok(openworkers_jsc::Value::undefined(ctx))
+    });
 
     context
-        .get_global_object()
+        .global_object()
         .set_property(context, "__completeEvent", complete_event_callback.into())
         .unwrap();
 
@@ -860,14 +856,12 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
         };
     "#;
 
-    context
-        .evaluate_script(add_event_listener_script, 1)
-        .unwrap();
+    context.evaluate_script(add_event_listener_script).unwrap();
 }
 
 /// Setup environment variables as globalThis.env
 fn setup_env(
-    context: &mut rusty_jsc::JSContext,
+    context: &openworkers_jsc::Context,
     env: &Option<std::collections::HashMap<String, String>>,
     bindings: &[openworkers_core::BindingInfo],
 ) {
@@ -887,7 +881,7 @@ fn setup_env(
         binding_objects(bindings).join(",")
     );
 
-    context.evaluate_script(&script, 1).unwrap();
+    context.evaluate_script(&script).unwrap();
 }
 
 /// One `env` object per binding this runtime serves, which wins over a variable

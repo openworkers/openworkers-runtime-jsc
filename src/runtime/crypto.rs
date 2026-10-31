@@ -1,392 +1,360 @@
+use openworkers_jsc::Context;
+use openworkers_jsc::Object;
+use openworkers_jsc::Value;
 use ring::{digest, hmac, rand, rsa, signature, signature::KeyPair};
-use rusty_jsc::JSContext;
-use rusty_jsc::JSValue;
 
 /// Web Crypto hands its results back as an ArrayBuffer
-fn array_buffer(context: &mut JSContext, bytes: &[u8]) -> Result<JSValue, JSValue> {
+fn array_buffer<'c>(context: &'c Context, bytes: &[u8]) -> Result<Value<'c>, Value<'c>> {
     let array = super::new_uint8_array(context, bytes)?;
 
     array
         .to_object(context)?
         .get_property(context, "buffer")
-        .ok_or_else(|| JSValue::string(context, "Uint8Array has no buffer"))
+        .map_err(|_| Value::string(context, "Uint8Array has no buffer"))
 }
 
 /// Setup crypto global object with getRandomValues, randomUUID, and subtle
-pub fn setup_crypto(context: &mut JSContext) {
+pub fn setup_crypto(context: &Context) {
     // Create __nativeRandomBytes(length) -> Uint8Array
-    let random_bytes_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            let length = match args.first().map(|arg| arg.to_number(&ctx)) {
-                Some(Ok(length)) if length >= 0.0 => length as usize,
-                _ => return Err(JSValue::string(&ctx, "randomBytes requires a length")),
-            };
+    let random_bytes_fn = Object::new_function(context, move |ctx, _this, args| {
+        let length = match args.first().map(|arg| arg.to_number(ctx)) {
+            Some(Ok(length)) if length >= 0.0 => length as usize,
+            _ => return Err(Value::string(ctx, "randomBytes requires a length")),
+        };
 
-            let mut bytes = vec![0u8; length];
-            let rng = rand::SystemRandom::new();
+        let mut bytes = vec![0u8; length];
+        let rng = rand::SystemRandom::new();
 
-            if rand::SecureRandom::fill(&rng, &mut bytes).is_err() {
-                return Err(JSValue::string(&ctx, "Failed to generate random bytes"));
-            }
-
-            super::new_uint8_array(&mut ctx, &bytes)
+        if rand::SecureRandom::fill(&rng, &mut bytes).is_err() {
+            return Err(Value::string(ctx, "Failed to generate random bytes"));
         }
-    );
+
+        super::new_uint8_array(ctx, &bytes)
+    });
 
     // Create __nativeRandomUUID function
-    let random_uuid_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, _args: &[JSValue]| {
-            let uuid = uuid::Uuid::new_v4().to_string();
-            Ok(JSValue::string(&ctx, uuid.as_str()))
-        }
-    );
+    let random_uuid_fn = Object::new_function(context, move |ctx, _this, _args| {
+        let uuid = uuid::Uuid::new_v4().to_string();
+        Ok(Value::string(ctx, uuid.as_str()))
+    });
 
     // Create __nativeDigest(algorithm, data) -> Uint8Array
-    let digest_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(&ctx, "digest requires algorithm and data"));
-            }
-
-            // Get algorithm name
-            let algo = match args[0].to_js_string(&ctx) {
-                Ok(s) => s.to_string().to_uppercase(),
-                Err(_) => return Err(JSValue::string(&ctx, "Algorithm must be a string")),
-            };
-
-            // Get data as Uint8Array
-            let data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            // Select algorithm
-            let algorithm = match algo.as_str() {
-                "SHA-1" => &digest::SHA1_FOR_LEGACY_USE_ONLY,
-                "SHA-256" => &digest::SHA256,
-                "SHA-384" => &digest::SHA384,
-                "SHA-512" => &digest::SHA512,
-                _ => return Err(JSValue::string(&ctx, "Unsupported algorithm")),
-            };
-
-            array_buffer(&mut ctx, digest::digest(algorithm, &data).as_ref())
+    let digest_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(ctx, "digest requires algorithm and data"));
         }
-    );
+
+        // Get algorithm name
+        let algo = match args[0].to_string(ctx) {
+            Ok(s) => s.to_string().to_uppercase(),
+            Err(_) => return Err(Value::string(ctx, "Algorithm must be a string")),
+        };
+
+        // Get data as Uint8Array
+        let data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "Data must be a Uint8Array")),
+        };
+
+        // Select algorithm
+        let algorithm = match algo.as_str() {
+            "SHA-1" => &digest::SHA1_FOR_LEGACY_USE_ONLY,
+            "SHA-256" => &digest::SHA256,
+            "SHA-384" => &digest::SHA384,
+            "SHA-512" => &digest::SHA512,
+            _ => return Err(Value::string(ctx, "Unsupported algorithm")),
+        };
+
+        array_buffer(ctx, digest::digest(algorithm, &data).as_ref())
+    });
 
     // Create __nativeHmacSign(algorithm, keyData, data) -> Uint8Array
-    let hmac_sign_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 3 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "hmacSign requires algorithm, keyData, and data",
-                ));
-            }
-
-            // Get algorithm name
-            let algo = match args[0].to_js_string(&ctx) {
-                Ok(s) => s.to_string().to_uppercase(),
-                Err(_) => return Err(JSValue::string(&ctx, "Algorithm must be a string")),
-            };
-
-            // Get key data
-            let key_data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "Key must be a Uint8Array")),
-            };
-
-            // Get data
-            let data = match super::typed_array_bytes(&ctx, &args[2]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            // Select algorithm
-            let algorithm = match algo.as_str() {
-                "SHA-1" => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
-                "SHA-256" => hmac::HMAC_SHA256,
-                "SHA-384" => hmac::HMAC_SHA384,
-                "SHA-512" => hmac::HMAC_SHA512,
-                _ => return Err(JSValue::string(&ctx, "Unsupported HMAC algorithm")),
-            };
-
-            // Sign
-            let key = hmac::Key::new(algorithm, &key_data);
-            let tag = hmac::sign(&key, &data);
-
-            array_buffer(&mut ctx, tag.as_ref())
+    let hmac_sign_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 3 {
+            return Err(Value::string(
+                ctx,
+                "hmacSign requires algorithm, keyData, and data",
+            ));
         }
-    );
+
+        // Get algorithm name
+        let algo = match args[0].to_string(ctx) {
+            Ok(s) => s.to_string().to_uppercase(),
+            Err(_) => return Err(Value::string(ctx, "Algorithm must be a string")),
+        };
+
+        // Get key data
+        let key_data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "Key must be a Uint8Array")),
+        };
+
+        // Get data
+        let data = match super::typed_array_bytes(ctx, &args[2]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "Data must be a Uint8Array")),
+        };
+
+        // Select algorithm
+        let algorithm = match algo.as_str() {
+            "SHA-1" => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+            "SHA-256" => hmac::HMAC_SHA256,
+            "SHA-384" => hmac::HMAC_SHA384,
+            "SHA-512" => hmac::HMAC_SHA512,
+            _ => return Err(Value::string(ctx, "Unsupported HMAC algorithm")),
+        };
+
+        // Sign
+        let key = hmac::Key::new(algorithm, &key_data);
+        let tag = hmac::sign(&key, &data);
+
+        array_buffer(ctx, tag.as_ref())
+    });
 
     // Create __nativeHmacVerify(algorithm, keyData, signature, data) -> boolean
-    let hmac_verify_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 4 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "hmacVerify requires algorithm, keyData, signature, and data",
-                ));
-            }
-
-            // Get algorithm name
-            let algo = match args[0].to_js_string(&ctx) {
-                Ok(s) => s.to_string().to_uppercase(),
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Get key data
-            let key_data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Get signature
-            let signature = match super::typed_array_bytes(&ctx, &args[2]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Get data
-            let data = match super::typed_array_bytes(&ctx, &args[3]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Select algorithm
-            let algorithm = match algo.as_str() {
-                "SHA-1" => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
-                "SHA-256" => hmac::HMAC_SHA256,
-                "SHA-384" => hmac::HMAC_SHA384,
-                "SHA-512" => hmac::HMAC_SHA512,
-                _ => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Verify
-            let key = hmac::Key::new(algorithm, &key_data);
-            let is_valid = hmac::verify(&key, &data, &signature).is_ok();
-
-            Ok(JSValue::boolean(&ctx, is_valid))
+    let hmac_verify_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 4 {
+            return Err(Value::string(
+                ctx,
+                "hmacVerify requires algorithm, keyData, signature, and data",
+            ));
         }
-    );
+
+        // Get algorithm name
+        let algo = match args[0].to_string(ctx) {
+            Ok(s) => s.to_string().to_uppercase(),
+            Err(_) => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Get key data
+        let key_data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Get signature
+        let signature = match super::typed_array_bytes(ctx, &args[2]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Get data
+        let data = match super::typed_array_bytes(ctx, &args[3]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Select algorithm
+        let algorithm = match algo.as_str() {
+            "SHA-1" => hmac::HMAC_SHA1_FOR_LEGACY_USE_ONLY,
+            "SHA-256" => hmac::HMAC_SHA256,
+            "SHA-384" => hmac::HMAC_SHA384,
+            "SHA-512" => hmac::HMAC_SHA512,
+            _ => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Verify
+        let key = hmac::Key::new(algorithm, &key_data);
+        let is_valid = hmac::verify(&key, &data, &signature).is_ok();
+
+        Ok(Value::boolean(ctx, is_valid))
+    });
 
     // Create __nativeEcdsaGenerateKey() -> { privateKey: ArrayBuffer, publicKey: ArrayBuffer }
-    let ecdsa_generate_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, _args: &[JSValue]| {
-            let rng = rand::SystemRandom::new();
+    let ecdsa_generate_fn = Object::new_function(context, move |ctx, _this, _args| {
+        let rng = rand::SystemRandom::new();
 
-            // Generate ECDSA P-256 key pair
-            let pkcs8_bytes = match signature::EcdsaKeyPair::generate_pkcs8(
-                &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-                &rng,
-            ) {
-                Ok(bytes) => bytes,
-                Err(_) => return Err(JSValue::string(&ctx, "Key generation failed")),
-            };
+        // Generate ECDSA P-256 key pair
+        let pkcs8_bytes = match signature::EcdsaKeyPair::generate_pkcs8(
+            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &rng,
+        ) {
+            Ok(bytes) => bytes,
+            Err(_) => return Err(Value::string(ctx, "Key generation failed")),
+        };
 
-            // Parse the key pair to get the public key
-            let key_pair = match signature::EcdsaKeyPair::from_pkcs8(
-                &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-                pkcs8_bytes.as_ref(),
-                &rng,
-            ) {
-                Ok(kp) => kp,
-                Err(_) => return Err(JSValue::string(&ctx, "Failed to parse key pair")),
-            };
+        // Parse the key pair to get the public key
+        let key_pair = match signature::EcdsaKeyPair::from_pkcs8(
+            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            pkcs8_bytes.as_ref(),
+            &rng,
+        ) {
+            Ok(kp) => kp,
+            Err(_) => return Err(Value::string(ctx, "Failed to parse key pair")),
+        };
 
-            let private_key = array_buffer(&mut ctx, pkcs8_bytes.as_ref())?;
-            let public_key = array_buffer(&mut ctx, key_pair.public_key().as_ref())?;
+        let private_key = array_buffer(ctx, pkcs8_bytes.as_ref())?;
+        let public_key = array_buffer(ctx, key_pair.public_key().as_ref())?;
 
-            let mut pair = JSObject::<rusty_jsc::JSObjectGeneric>::new(&ctx);
+        let pair = Object::new(ctx);
 
-            pair.set_property(&ctx, "privateKey", private_key)?;
-            pair.set_property(&ctx, "publicKey", public_key)?;
+        pair.set_property(ctx, "privateKey", private_key)?;
+        pair.set_property(ctx, "publicKey", public_key)?;
 
-            Ok(pair.into())
-        }
-    );
+        Ok(pair.into())
+    });
 
     // Create __nativeEcdsaSign(privateKeyPkcs8, data) -> ArrayBuffer
-    let ecdsa_sign_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 2 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "ecdsaSign requires privateKey and data",
-                ));
-            }
-
-            let private_key_data = match super::typed_array_bytes(&ctx, &args[0]) {
-                Some(bytes) => bytes,
-                None => {
-                    return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
-                }
-            };
-
-            let data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            let rng = rand::SystemRandom::new();
-
-            // Load the key pair from PKCS#8
-            let key_pair = match signature::EcdsaKeyPair::from_pkcs8(
-                &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
-                &private_key_data,
-                &rng,
-            ) {
-                Ok(kp) => kp,
-                Err(_) => return Err(JSValue::string(&ctx, "Invalid private key")),
-            };
-
-            // Sign the data
-            let sig = match key_pair.sign(&rng, &data) {
-                Ok(s) => s,
-                Err(_) => return Err(JSValue::string(&ctx, "Signing failed")),
-            };
-
-            array_buffer(&mut ctx, sig.as_ref())
+    let ecdsa_sign_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 2 {
+            return Err(Value::string(ctx, "ecdsaSign requires privateKey and data"));
         }
-    );
+
+        let private_key_data = match super::typed_array_bytes(ctx, &args[0]) {
+            Some(bytes) => bytes,
+            None => {
+                return Err(Value::string(ctx, "Private key must be a Uint8Array"));
+            }
+        };
+
+        let data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "Data must be a Uint8Array")),
+        };
+
+        let rng = rand::SystemRandom::new();
+
+        // Load the key pair from PKCS#8
+        let key_pair = match signature::EcdsaKeyPair::from_pkcs8(
+            &signature::ECDSA_P256_SHA256_FIXED_SIGNING,
+            &private_key_data,
+            &rng,
+        ) {
+            Ok(kp) => kp,
+            Err(_) => return Err(Value::string(ctx, "Invalid private key")),
+        };
+
+        // Sign the data
+        let sig = match key_pair.sign(&rng, &data) {
+            Ok(s) => s,
+            Err(_) => return Err(Value::string(ctx, "Signing failed")),
+        };
+
+        array_buffer(ctx, sig.as_ref())
+    });
 
     // Create __nativeEcdsaVerify(publicKey, signature, data) -> boolean
-    let ecdsa_verify_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 3 {
-                return Ok(JSValue::boolean(&ctx, false));
-            }
-
-            let public_key_data = match super::typed_array_bytes(&ctx, &args[0]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let sig_data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let data = match super::typed_array_bytes(&ctx, &args[2]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Verify using UnparsedPublicKey
-            let public_key = signature::UnparsedPublicKey::new(
-                &signature::ECDSA_P256_SHA256_FIXED,
-                &public_key_data,
-            );
-
-            let is_valid = public_key.verify(&data, &sig_data).is_ok();
-            Ok(JSValue::boolean(&ctx, is_valid))
+    let ecdsa_verify_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 3 {
+            return Ok(Value::boolean(ctx, false));
         }
-    );
+
+        let public_key_data = match super::typed_array_bytes(ctx, &args[0]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let sig_data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let data = match super::typed_array_bytes(ctx, &args[2]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Verify using UnparsedPublicKey
+        let public_key = signature::UnparsedPublicKey::new(
+            &signature::ECDSA_P256_SHA256_FIXED,
+            &public_key_data,
+        );
+
+        let is_valid = public_key.verify(&data, &sig_data).is_ok();
+        Ok(Value::boolean(ctx, is_valid))
+    });
 
     // Create __nativeRsaSign(hashAlgo, privateKeyDer, data) -> ArrayBuffer
-    let rsa_sign_fn = rusty_jsc::callback_closure!(
-        context,
-        move |mut ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 3 {
-                return Err(JSValue::string(
-                    &ctx,
-                    "rsaSign requires hashAlgo, privateKey, and data",
-                ));
-            }
-
-            let hash_algo = match args[0].to_js_string(&ctx) {
-                Ok(s) => s.to_string().to_uppercase(),
-                Err(_) => return Err(JSValue::string(&ctx, "Hash algorithm must be a string")),
-            };
-
-            let private_key_data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => {
-                    return Err(JSValue::string(&ctx, "Private key must be a Uint8Array"));
-                }
-            };
-
-            let data = match super::typed_array_bytes(&ctx, &args[2]) {
-                Some(bytes) => bytes,
-                None => return Err(JSValue::string(&ctx, "Data must be a Uint8Array")),
-            };
-
-            // Select padding/encoding based on hash algorithm
-            let padding = match hash_algo.as_str() {
-                "SHA-256" => &signature::RSA_PKCS1_SHA256,
-                "SHA-384" => &signature::RSA_PKCS1_SHA384,
-                "SHA-512" => &signature::RSA_PKCS1_SHA512,
-                _ => return Err(JSValue::string(&ctx, "Unsupported hash algorithm")),
-            };
-
-            // Load RSA key pair from DER
-            let key_pair = match rsa::KeyPair::from_der(&private_key_data) {
-                Ok(kp) => kp,
-                Err(_) => return Err(JSValue::string(&ctx, "Invalid RSA private key")),
-            };
-
-            let rng = rand::SystemRandom::new();
-            let mut sig = vec![0u8; key_pair.public().modulus_len()];
-
-            match key_pair.sign(padding, &rng, &data, &mut sig) {
-                Ok(_) => array_buffer(&mut ctx, &sig),
-                Err(_) => Err(JSValue::string(&ctx, "RSA signing failed")),
-            }
+    let rsa_sign_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 3 {
+            return Err(Value::string(
+                ctx,
+                "rsaSign requires hashAlgo, privateKey, and data",
+            ));
         }
-    );
+
+        let hash_algo = match args[0].to_string(ctx) {
+            Ok(s) => s.to_string().to_uppercase(),
+            Err(_) => return Err(Value::string(ctx, "Hash algorithm must be a string")),
+        };
+
+        let private_key_data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => {
+                return Err(Value::string(ctx, "Private key must be a Uint8Array"));
+            }
+        };
+
+        let data = match super::typed_array_bytes(ctx, &args[2]) {
+            Some(bytes) => bytes,
+            None => return Err(Value::string(ctx, "Data must be a Uint8Array")),
+        };
+
+        // Select padding/encoding based on hash algorithm
+        let padding = match hash_algo.as_str() {
+            "SHA-256" => &signature::RSA_PKCS1_SHA256,
+            "SHA-384" => &signature::RSA_PKCS1_SHA384,
+            "SHA-512" => &signature::RSA_PKCS1_SHA512,
+            _ => return Err(Value::string(ctx, "Unsupported hash algorithm")),
+        };
+
+        // Load RSA key pair from DER
+        let key_pair = match rsa::KeyPair::from_der(&private_key_data) {
+            Ok(kp) => kp,
+            Err(_) => return Err(Value::string(ctx, "Invalid RSA private key")),
+        };
+
+        let rng = rand::SystemRandom::new();
+        let mut sig = vec![0u8; key_pair.public().modulus_len()];
+
+        match key_pair.sign(padding, &rng, &data, &mut sig) {
+            Ok(_) => array_buffer(ctx, &sig),
+            Err(_) => Err(Value::string(ctx, "RSA signing failed")),
+        }
+    });
 
     // Create __nativeRsaVerify(hashAlgo, publicKeyDer, signature, data) -> boolean
-    let rsa_verify_fn = rusty_jsc::callback_closure!(
-        context,
-        move |ctx: JSContext, _func: JSObject, _this: JSObject, args: &[JSValue]| {
-            if args.len() < 4 {
-                return Ok(JSValue::boolean(&ctx, false));
-            }
-
-            let hash_algo = match args[0].to_js_string(&ctx) {
-                Ok(s) => s.to_string().to_uppercase(),
-                Err(_) => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let public_key_data = match super::typed_array_bytes(&ctx, &args[1]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let sig_data = match super::typed_array_bytes(&ctx, &args[2]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let data = match super::typed_array_bytes(&ctx, &args[3]) {
-                Some(bytes) => bytes,
-                None => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            // Select verification algorithm based on hash
-            let algorithm: &dyn signature::VerificationAlgorithm = match hash_algo.as_str() {
-                "SHA-256" => &signature::RSA_PKCS1_2048_8192_SHA256,
-                "SHA-384" => &signature::RSA_PKCS1_2048_8192_SHA384,
-                "SHA-512" => &signature::RSA_PKCS1_2048_8192_SHA512,
-                _ => return Ok(JSValue::boolean(&ctx, false)),
-            };
-
-            let public_key = signature::UnparsedPublicKey::new(algorithm, &public_key_data);
-            let is_valid = public_key.verify(&data, &sig_data).is_ok();
-
-            Ok(JSValue::boolean(&ctx, is_valid))
+    let rsa_verify_fn = Object::new_function(context, move |ctx, _this, args| {
+        if args.len() < 4 {
+            return Ok(Value::boolean(ctx, false));
         }
-    );
+
+        let hash_algo = match args[0].to_string(ctx) {
+            Ok(s) => s.to_string().to_uppercase(),
+            Err(_) => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let public_key_data = match super::typed_array_bytes(ctx, &args[1]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let sig_data = match super::typed_array_bytes(ctx, &args[2]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let data = match super::typed_array_bytes(ctx, &args[3]) {
+            Some(bytes) => bytes,
+            None => return Ok(Value::boolean(ctx, false)),
+        };
+
+        // Select verification algorithm based on hash
+        let algorithm: &dyn signature::VerificationAlgorithm = match hash_algo.as_str() {
+            "SHA-256" => &signature::RSA_PKCS1_2048_8192_SHA256,
+            "SHA-384" => &signature::RSA_PKCS1_2048_8192_SHA384,
+            "SHA-512" => &signature::RSA_PKCS1_2048_8192_SHA512,
+            _ => return Ok(Value::boolean(ctx, false)),
+        };
+
+        let public_key = signature::UnparsedPublicKey::new(algorithm, &public_key_data);
+        let is_valid = public_key.verify(&data, &sig_data).is_ok();
+
+        Ok(Value::boolean(ctx, is_valid))
+    });
 
     // Add native functions to global
-    let mut global = context.get_global_object();
+    let global = context.global_object();
     global
         .set_property(context, "__nativeRandomBytes", random_bytes_fn.into())
         .unwrap();
@@ -725,6 +693,6 @@ pub fn setup_crypto(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(crypto_script, 1)
+        .evaluate_script(crypto_script)
         .expect("Failed to setup crypto");
 }

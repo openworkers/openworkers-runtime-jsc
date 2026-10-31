@@ -67,7 +67,7 @@ async fn main() {
             log::info!("Script executed successfully");
         }
         Err(e) => {
-            if let Ok(err_str) = e.to_js_string(&runtime.context) {
+            if let Ok(err_str) = e.to_string(&runtime.context) {
                 eprintln!("Script execution failed: {}", err_str);
             } else {
                 eprintln!("Script execution failed with unknown error");

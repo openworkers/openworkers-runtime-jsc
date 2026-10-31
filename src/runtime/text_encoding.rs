@@ -1,8 +1,8 @@
-use rusty_jsc::JSContext;
+use openworkers_jsc::Context;
 
 /// Setup TextEncoder and TextDecoder APIs
 /// These are essential for converting between strings and bytes
-pub fn setup_text_encoding(context: &mut JSContext) {
+pub fn setup_text_encoding(context: &Context) {
     let code = r#"
         // TextEncoder - encode strings to UTF-8 bytes
         globalThis.TextEncoder = class TextEncoder {
@@ -97,6 +97,6 @@ pub fn setup_text_encoding(context: &mut JSContext) {
     "#;
 
     context
-        .evaluate_script(code, 1)
+        .evaluate_script(code)
         .expect("Failed to setup TextEncoder/TextDecoder");
 }
