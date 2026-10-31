@@ -68,7 +68,11 @@ See [TODO.md](TODO.md) for planned features.
   `openworkers_jsc::init` with `polling_traps` before other threads start,
   or set `JSC_usePollingTraps=true`. The system framework runs the JIT only
   in a binary with the `com.apple.security.cs.allow-jit` entitlement; the
-  static build always runs it.
+  static build always runs it. With the JIT and without polling traps, the
+  watchdog cuts some loops late or never: an empty loop and a loop of
+  `Date.now()` calls on the system framework, a loop of `Date.now()` calls
+  on the static build. The check at the first worker runs these loops,
+  and refuses every worker when a cut comes late.
 - `static`: the WTF timers (GC, sweeper, FinalizationRegistry callbacks) go
   to a host per thread, which the worker fires from its event loop under its
   CPU budget.

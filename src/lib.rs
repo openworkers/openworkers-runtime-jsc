@@ -7,6 +7,11 @@ pub use runtime::stream_manager::{StreamChunk, StreamManager};
 pub use runtime::{Runtime, run_event_loop};
 pub use worker::Worker;
 
+// The JSC options, such as the polling traps that the CPU limit needs with
+// the JIT; set them before other threads start
+pub use openworkers_jsc::Options as JscOptions;
+pub use openworkers_jsc::init as init_jsc;
+
 /// Binding types this runtime serves, for an embedder that refuses a worker
 /// declaring one it cannot
 pub const SUPPORTED_BINDINGS: &[openworkers_core::BindingType] = &[

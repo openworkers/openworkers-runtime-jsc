@@ -22,10 +22,12 @@
 //! - The watchdog does not cut native code, such as a regular expression
 //!   that backtracks: `(a+)+b` ran 1.7 s against a limit of 50 ms. Its time
 //!   is still taken from the budget when the entry returns.
-//! - With the JIT, the watchdog cuts JIT code only with polling traps: call
-//!   openworkers_jsc::init with polling_traps. Without them the check below
-//!   fails, and no worker starts.
-//! - The check runs a loop on a thread of its own. If the limit does not
+//! - With the JIT and without polling traps, the watchdog cuts some loops
+//!   late or never: on the system framework an empty loop and a loop that
+//!   calls Date.now(), on the static build a loop that calls Date.now().
+//!   Call openworkers_jsc::init with polling_traps. The check below runs
+//!   these loops and refuses every worker when a cut comes late.
+//! - The check runs its loops on a thread of its own. If the limit does not
 //!   work, that thread spins for the life of the process.
 //! - Only the CPU time of the thread that calls is counted, not the GC and
 //!   JIT threads of JavaScriptCore.
@@ -44,6 +46,15 @@ use std::time::Duration;
 
 /// The longest CPU time of an entry between two checks of the deadline
 const PERIOD: Duration = Duration::from_millis(5);
+
+/// The check of the limit: each loop must be cut within CUT_WITHIN of CPU
+/// time, under a limit of 10 ms. With polling traps, cuts came after 10 to
+/// 15 ms
+const CUT_WITHIN: Duration = Duration::from_millis(40);
+
+/// The compiled loop runs this many times: without polling traps, one of
+/// its cuts may come in time (12 ms), most come late (up to 0.9 s)
+const TRIALS: usize = 8;
 
 /// The CPU floor of the top level of a script: a large bundle needs more to
 /// parse and start than a request gets (LOAD_CPU_TIME_MS of runtime-v8)
@@ -136,8 +147,8 @@ impl CpuLimit {
 
         if !works() {
             return Err(TerminationReason::InitializationError(
-                "the CPU limit of JavaScriptCore does not work here (with the JIT, set \
-                 JSC_usePollingTraps=true)"
+                "the CPU limit of JavaScriptCore does not work here (with the JIT, call \
+                 openworkers_jsc::init with polling_traps)"
                     .to_string(),
             ));
         }
@@ -227,7 +238,9 @@ impl CpuLimit {
     }
 }
 
-/// Whether the limit cuts a loop that never ends, checked once per process.
+/// Whether the limit cuts, in time, the loops that escape it without polling
+/// traps: an empty loop, a loop that calls Date.now(), and the same loop
+/// once the JIT compiled it. Checked once per process.
 fn works() -> bool {
     static WORKS: OnceLock<bool> = OnceLock::new();
 
@@ -245,20 +258,49 @@ fn works() -> bool {
                     deadline: AtomicU64::new(0),
                 };
 
-                // SAFETY: the group belongs to `context`; `watch` outlives the
-                // script, the only time the watchdog runs
-                unsafe {
-                    JSContextGroupSetExecutionTimeLimit(
-                        JSContextGetGroup(context.as_raw()),
-                        0.01,
-                        Some(check),
-                        &watch as *const Watch as *mut c_void,
-                    );
+                let cut_in_time = |script: &str| {
+                    watch.hit.store(false, Ordering::SeqCst);
+
+                    // SAFETY: the group belongs to `context`; `watch` outlives
+                    // the script, the only time the watchdog runs
+                    unsafe {
+                        JSContextGroupSetExecutionTimeLimit(
+                            JSContextGetGroup(context.as_raw()),
+                            0.01,
+                            Some(check),
+                            &watch as *const Watch as *mut c_void,
+                        );
+                    }
+
+                    let start = thread_cpu_time();
+                    let ended = context.evaluate_script(script).is_err();
+                    let took = thread_cpu_time().saturating_sub(start);
+
+                    ended && watch.hit.load(Ordering::SeqCst) && took < CUT_WITHIN
+                };
+
+                if !cut_in_time("for (;;) {}") || !cut_in_time("for (;;) { Date.now(); }") {
+                    done.send(false).ok();
+                    return;
                 }
 
-                let ended = context.evaluate_script("for (;;) {}").is_err();
+                // The warm-up runs without the limit, and makes the JIT
+                // compile the loop
+                context.group().clear_execution_time_limit();
+                context
+                    .evaluate_script(
+                        "globalThis.spin = (n) => {
+                            let t = 0;
+                            for (let i = 0; i < n; i++) t += Date.now();
+                            return t;
+                        };
+                        for (let i = 0; i < 20; i++) spin(2000);",
+                    )
+                    .expect("the check script runs");
 
-                done.send(ended && watch.hit.load(Ordering::SeqCst)).ok();
+                let in_time = (0..TRIALS).all(|_| cut_in_time("spin(Infinity)"));
+
+                done.send(in_time).ok();
             });
 
         spawned.is_ok() && cut.recv_timeout(Duration::from_secs(2)).unwrap_or(false)
