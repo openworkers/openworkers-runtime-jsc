@@ -390,9 +390,6 @@ async fn test_event_request_url_with_quote() {
     let injected = worker
         .evaluate("typeof globalThis.injected")
         .expect("Should evaluate");
-    let injected = injected
-        .to_js_string(worker.context())
-        .expect("Should be a string");
 
-    assert_eq!(injected.to_string(), "undefined");
+    assert_eq!(injected, "undefined");
 }

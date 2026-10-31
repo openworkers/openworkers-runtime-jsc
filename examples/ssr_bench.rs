@@ -79,17 +79,12 @@ fn rss_kb() -> Option<u64> {
 }
 
 fn report_console(worker: &mut Worker) {
-    let value = match worker.evaluate("globalThis.__consoleLines.splice(0).join('\\n')") {
-        Ok(value) => value,
+    let text = match worker.evaluate("globalThis.__consoleLines.splice(0).join('\\n')") {
+        Ok(text) => text,
         Err(e) => {
             println!("console drain failed: {}", e);
             return;
         }
-    };
-
-    let text = match value.to_js_string(worker.context()) {
-        Ok(text) => text.to_string(),
-        Err(_) => return,
     };
 
     for line in text.lines().filter(|line| !line.is_empty()) {

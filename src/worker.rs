@@ -1,3 +1,4 @@
+use crate::cpu_limit::CpuLimit;
 use crate::runtime::{Runtime, run_event_loop, stream_manager::StreamChunk};
 use openworkers_core::{
     Event, HttpResponse, OperationsHandle, RequestBody, ResponseBody, RuntimeLimits, Script,
@@ -48,20 +49,22 @@ pub struct Worker {
 }
 
 impl Worker {
-    /// Evaluate a script for testing/inspection
-    pub fn evaluate(&mut self, script: &str) -> Result<rusty_jsc::JSValue, String> {
-        self.runtime.evaluate(script).map_err(|e| {
-            if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
-                err_str.to_string()
-            } else {
-                "Evaluation failed".to_string()
-            }
-        })
-    }
+    /// Evaluates a script for testing or inspection, under what is left of
+    /// the CPU budget, and answers the text of its value. No value of the
+    /// guest leaves the worker: reading one can run guest code, which must
+    /// be a call under the budget.
+    pub fn evaluate(&mut self, script: &str) -> Result<String, String> {
+        let runtime = &mut self.runtime;
+        let reason = |reason: TerminationReason| format!("{reason:?}");
+        let evaluated = runtime
+            .cpu
+            .run(|| runtime.context.evaluate_script(script, 1))
+            .map_err(reason)?;
 
-    /// Get context reference for testing
-    pub fn context(&self) -> &rusty_jsc::JSContext {
-        &self.runtime.context
+        match evaluated {
+            Ok(value) => runtime.value_text(&value).map_err(reason),
+            Err(e) => Err(runtime.value_text(&e).unwrap_or_else(reason)),
+        }
     }
 }
 
@@ -74,8 +77,12 @@ impl Worker {
         limits: Option<RuntimeLimits>,
         ops: OperationsHandle,
     ) -> Result<Self, TerminationReason> {
+        let limits = limits.unwrap_or_default();
         let (mut runtime, scheduler_rx, callback_tx, stream_manager) = Runtime::new();
         let completion = Rc::new(RefCell::new(Completion::default()));
+
+        // Before any guest code: the top level of the script is cut too
+        runtime.cpu = CpuLimit::new(&runtime.context, limits.max_cpu_time_ms)?;
 
         // Setup addEventListener binding
         setup_event_listener(&mut runtime.context, completion.clone());
@@ -91,14 +98,22 @@ impl Worker {
             TerminationReason::Exception("Only JavaScript code is supported".to_string())
         })?;
 
-        // Load and evaluate the worker script
-        runtime.evaluate(js_code).map_err(|e| {
-            if let Ok(err_str) = e.to_js_string(&runtime.context) {
-                TerminationReason::Exception(format!("Script evaluation failed: {}", err_str))
-            } else {
-                TerminationReason::Exception("Script evaluation failed".to_string())
-            }
-        })?;
+        // Load and evaluate the worker script, with the floor of a load
+        runtime.cpu.refill_for_load();
+
+        let evaluated = runtime
+            .cpu
+            .run(|| runtime.context.evaluate_script(js_code, 1))?;
+
+        if let Err(e) = evaluated {
+            return Err(TerminationReason::Exception(format!(
+                "Script evaluation failed: {}",
+                runtime.value_text(&e)?
+            )));
+        }
+
+        // The floor was for the load only
+        runtime.cpu.refill();
 
         // Start event loop in background
         let event_loop_handle = tokio::spawn(async move {
@@ -110,7 +125,7 @@ impl Worker {
             completion,
             event_loop_handle,
             aborted: Arc::new(AtomicBool::new(false)),
-            limits: limits.unwrap_or_default(),
+            limits,
         })
     }
 
@@ -128,15 +143,22 @@ impl Worker {
 
     /// Makes the worker ready for its next event: drops the timers, the
     /// pending callbacks and the tasks of the previous one. It runs no
-    /// JavaScript that the guest can change. An error means the worker must
-    /// not be used.
+    /// JavaScript that the guest can change, and its one call into JavaScript
+    /// is under the CPU limit. An error means the worker must not be used.
     pub fn reset(&mut self) -> Result<(), TerminationReason> {
+        if self.runtime.cpu.hit() {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
         self.stop_tasks();
 
         // Answers to the previous event find no callback after the clear
         while self.runtime.callback_rx.try_recv().is_ok() {}
 
-        crate::runtime::bindings::call_global(&self.runtime.context, "__clearCallbacks", &[])
+        self.runtime.cpu.refill();
+
+        self.runtime
+            .call("__clearCallbacks", &[])?
             .map(|_| ())
             .map_err(|_| TerminationReason::Other("the reset of the worker failed".to_string()))
     }
@@ -173,14 +195,26 @@ impl Worker {
 
         self.stop_tasks();
 
+        // A cut entry leaves an error, or a completion that never comes
+        if self.runtime.cpu.hit() {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
         result
     }
 
     async fn exec_event(&mut self, mut event: Event) -> Result<(), TerminationReason> {
+        // A worker whose entry was cut holds half an event
+        if self.runtime.cpu.hit() {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
         // Check if aborted before starting
         if self.aborted.load(Ordering::SeqCst) {
             return Err(TerminationReason::Aborted);
         }
+
+        self.runtime.cpu.refill();
 
         match event {
             Event::Fetch(ref mut init) => {
@@ -206,6 +240,10 @@ impl Worker {
 
         self.stop_tasks();
 
+        if self.runtime.cpu.hit() {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
         result
     }
 
@@ -213,6 +251,12 @@ impl Worker {
         &mut self,
         mut event: Event,
     ) -> Result<HttpResponse, TerminationReason> {
+        if self.runtime.cpu.hit() {
+            return Err(TerminationReason::CpuTimeLimit);
+        }
+
+        self.runtime.cpu.refill();
+
         match event {
             Event::Fetch(ref mut init) => {
                 let fetch_init = init.take().ok_or(TerminationReason::Other(
@@ -253,56 +297,10 @@ impl Worker {
         // One budget covers the handler and the response body it leaves behind
         let deadline = self.deadline();
 
-        let request_obj = self.make_request_object(&fetch_init.req).map_err(|_| {
-            TerminationReason::Exception("Failed to create Request object".to_string())
-        })?;
-
         // The handler reports the response metadata via the native __completeEvent
         let (epoch, done_rx) = self.completion.borrow_mut().arm();
 
-        let trigger_script = r#"
-            (function(request, epoch) {
-                if (typeof globalThis.__triggerFetch === 'function') {
-                    globalThis.__triggerFetch(request, epoch);
-                } else {
-                    throw new Error("No fetch handler registered");
-                }
-            })
-        "#;
-
-        let trigger_fn = self
-            .runtime
-            .context
-            .evaluate_script(trigger_script, 1)
-            .map_err(|_| {
-                TerminationReason::Exception("Failed to get trigger function".to_string())
-            })?
-            .to_object(&self.runtime.context)
-            .map_err(|_| TerminationReason::Exception("Trigger is not a function".to_string()))?;
-
-        let epoch = rusty_jsc::JSValue::number(&self.runtime.context, epoch as f64);
-        let trigger_result =
-            trigger_fn.call_as_function(&self.runtime.context, None, &[request_obj, epoch]);
-
-        if let Err(e) = trigger_result {
-            let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
-                let full_error = err_str.to_string();
-                log::error!("Fetch handler exception: {}", full_error);
-
-                // Try to get stack trace if available
-                if let Ok(err_obj) = e.to_object(&self.runtime.context)
-                    && let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack")
-                    && let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context)
-                {
-                    log::error!("Stack trace:\n{}", stack_str);
-                }
-
-                format!("Fetch handler exception: {}", full_error)
-            } else {
-                "Fetch handler error (unknown)".to_string()
-            };
-            return Err(TerminationReason::Exception(error_msg));
-        }
+        self.call_fetch_handler(&fetch_init.req, epoch)?;
 
         let json_str = self.wait_for_completion(done_rx, deadline).await?;
 
@@ -361,6 +359,69 @@ impl Worker {
         })
     }
 
+    /// Builds the Request and calls the fetch handler: one call into
+    /// JavaScript, to a function the guest cannot replace
+    fn call_fetch_handler(
+        &mut self,
+        req: &openworkers_core::HttpRequest,
+        epoch: u64,
+    ) -> Result<(), TerminationReason> {
+        let headers_json = serde_json::to_string(&req.headers).expect("headers are strings");
+        let body = match &req.body {
+            RequestBody::Bytes(bytes) if !bytes.is_empty() => {
+                crate::runtime::new_uint8_array(&mut self.runtime.context, bytes).map_err(|_| {
+                    TerminationReason::Exception("Failed to create Request object".to_string())
+                })?
+            }
+            _ => rusty_jsc::JSValue::null(&self.runtime.context),
+        };
+
+        let context = &self.runtime.context;
+        let args = [
+            rusty_jsc::JSValue::string(context, req.method.as_str()),
+            rusty_jsc::JSValue::string(context, req.url.as_str()),
+            rusty_jsc::JSValue::string(context, headers_json.as_str()),
+            body,
+            rusty_jsc::JSValue::number(context, epoch as f64),
+        ];
+
+        match self.runtime.call("__triggerFetch", &args)? {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.handler_error("Fetch", &e)?),
+        }
+    }
+
+    /// The error of a handler that threw. Each read of the thrown value is a
+    /// call under the CPU budget, since it can run guest code.
+    fn handler_error(
+        &self,
+        kind: &str,
+        error: &rusty_jsc::JSValue,
+    ) -> Result<TerminationReason, TerminationReason> {
+        let text = self.runtime.value_text(error)?;
+
+        log::error!("{} handler exception: {}", kind, text);
+
+        let context = &self.runtime.context;
+        let stack = self.runtime.cpu.run(|| {
+            let stack = error
+                .to_object(context)
+                .ok()?
+                .get_property(context, "stack")?;
+
+            stack.to_js_string(context).ok().map(|s| s.to_string())
+        })?;
+
+        if let Some(stack) = stack {
+            log::error!("Stack trace:\n{}", stack);
+        }
+
+        Ok(TerminationReason::Exception(format!(
+            "{} handler exception: {}",
+            kind, text
+        )))
+    }
+
     /// Forward a response body to the host, driving JS for as long as the guest
     /// still has chunks to produce
     ///
@@ -389,7 +450,9 @@ impl Worker {
                 },
                 msg = self.runtime.callback_rx.recv() => {
                     match msg {
-                        Some(msg) => self.runtime.handle_callback(msg),
+                        Some(msg) => {
+                            self.runtime.handle_callback(msg)?;
+                        }
                         None => return Err(TerminationReason::Other(
                             "Event loop stopped".to_string(),
                         )),
@@ -418,83 +481,20 @@ impl Worker {
             _ => None,
         };
 
-        // Build event object with task info
-        let payload_json = task_init
-            .payload
-            .as_ref()
-            .map(|p| serde_json::to_string(p).unwrap_or_default())
-            .unwrap_or_else(|| "null".to_string());
-
-        let scheduled_time_js = scheduled_time
-            .map(|t| t.to_string())
-            .unwrap_or_else(|| "undefined".to_string());
-
-        // Splice only JSON, or else a quote or a backslash in the task id breaks out
-        let task_id_json = serde_json::to_string(&task_init.task_id).expect("task id is a string");
-
-        let event_script = format!(
-            r#"({{
-                taskId: {},
-                attempt: {},
-                payload: {},
-                scheduledTime: {}
-            }})"#,
-            task_id_json, task_init.attempt, payload_json, scheduled_time_js
-        );
-
-        let event_obj = self
-            .runtime
-            .context
-            .evaluate_script(&event_script, 1)
-            .map_err(|_| TerminationReason::Exception("Failed to create event".to_string()))?;
+        // The event goes in as JSON: a quote in the task id cannot break out
+        let event_json = serde_json::json!({
+            "taskId": task_init.task_id,
+            "attempt": task_init.attempt,
+            "payload": task_init.payload,
+            "scheduledTime": scheduled_time,
+        })
+        .to_string();
 
         // The handler reports the task result via the native __completeEvent
         let (epoch, done_rx) = self.completion.borrow_mut().arm();
         let deadline = self.deadline();
 
-        // Try __taskHandler first, then fallback to __triggerScheduled for backward compat
-        let trigger_script = r#"
-            (function(event, epoch) {
-                if (typeof globalThis.__taskHandler === 'function') {
-                    return globalThis.__taskHandler(event, epoch);
-                } else if (typeof globalThis.__triggerScheduled === 'function') {
-                    return globalThis.__triggerScheduled(event, epoch);
-                }
-                throw new Error("No task handler registered");
-            })
-        "#;
-
-        let trigger_fn = self
-            .runtime
-            .context
-            .evaluate_script(trigger_script, 1)
-            .map_err(|_| TerminationReason::Exception("Failed to get trigger".to_string()))?
-            .to_object(&self.runtime.context)
-            .map_err(|_| TerminationReason::Exception("Trigger not a function".to_string()))?;
-
-        let epoch = rusty_jsc::JSValue::number(&self.runtime.context, epoch as f64);
-
-        if let Err(e) =
-            trigger_fn.call_as_function(&self.runtime.context, None, &[event_obj, epoch])
-        {
-            let error_msg = if let Ok(err_str) = e.to_js_string(&self.runtime.context) {
-                let full_error = err_str.to_string();
-                log::error!("Task handler exception: {}", full_error);
-
-                // Try to get stack trace
-                if let Ok(err_obj) = e.to_object(&self.runtime.context)
-                    && let Some(stack_val) = err_obj.get_property(&self.runtime.context, "stack")
-                    && let Ok(stack_str) = stack_val.to_js_string(&self.runtime.context)
-                {
-                    log::error!("Stack trace:\n{}", stack_str);
-                }
-
-                format!("Task handler exception: {}", full_error)
-            } else {
-                "Task handler error (unknown)".to_string()
-            };
-            return Err(TerminationReason::Exception(error_msg));
-        }
+        self.call_task_handler(&event_json, epoch)?;
 
         let json_str = self.wait_for_completion(done_rx, deadline).await?;
 
@@ -519,41 +519,19 @@ impl Worker {
         Ok(())
     }
 
-    fn make_request_object(
-        &mut self,
-        req: &openworkers_core::HttpRequest,
-    ) -> Result<rusty_jsc::JSValue, rusty_jsc::JSValue> {
-        let build_request_script = r#"
-            (function(method, url, headers, body) {
-                return new Request(url, {
-                    method: method,
-                    headers: JSON.parse(headers),
-                    body: body.length > 0 ? body : null
-                });
-            })
-        "#;
-
-        let build_request = self
-            .runtime
-            .context
-            .evaluate_script(build_request_script, 1)?
-            .to_object(&self.runtime.context)?;
-
-        let headers_json = serde_json::to_string(&req.headers).expect("headers are strings");
-
+    /// Builds the event and calls the task handler: one call into
+    /// JavaScript, to a function the guest cannot replace
+    fn call_task_handler(&mut self, event_json: &str, epoch: u64) -> Result<(), TerminationReason> {
         let context = &self.runtime.context;
-        let method = rusty_jsc::JSValue::string(context, req.method.as_str());
-        let url = rusty_jsc::JSValue::string(context, req.url.as_str());
-        let headers = rusty_jsc::JSValue::string(context, headers_json.as_str());
+        let args = [
+            rusty_jsc::JSValue::string(context, event_json),
+            rusty_jsc::JSValue::number(context, epoch as f64),
+        ];
 
-        let body: &[u8] = match &req.body {
-            RequestBody::Bytes(bytes) => bytes,
-            RequestBody::Stream(_) | RequestBody::None => &[],
-        };
-
-        let body = crate::runtime::new_uint8_array(&mut self.runtime.context, body)?;
-
-        build_request.call_as_function(&self.runtime.context, None, &[method, url, headers, body])
+        match self.runtime.call("__triggerTask", &args)? {
+            Ok(_) => Ok(()),
+            Err(e) => Err(self.handler_error("Task", &e)?),
+        }
     }
 
     /// The instant the wall-clock budget runs out, or None when there is none
@@ -579,7 +557,9 @@ impl Worker {
                 }
                 msg = self.runtime.callback_rx.recv() => {
                     match msg {
-                        Some(msg) => self.runtime.handle_callback(msg),
+                        Some(msg) => {
+                            self.runtime.handle_callback(msg)?;
+                        }
                         None => {
                             return Err(TerminationReason::Other(
                                 "Event loop stopped".to_string(),
@@ -639,6 +619,11 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
         .set_property(context, "__completeEvent", complete_event_callback.into())
         .unwrap();
 
+    // Known limit: the helpers below (__finishFetch, __streamResponseBody,
+    // __extractResponseMeta) are writable, and they call builtins the guest
+    // can replace (Promise.prototype.then, JSON.stringify, Headers). A guest
+    // that replaces one only breaks its own response: the code runs inside
+    // its events, under the CPU budget and the wall clock of the request.
     let add_event_listener_script = r#"
         // Hand control back to the event loop, so the host can drain what it has
         globalThis.__yieldToHost = function() {
@@ -721,10 +706,64 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
             });
         };
 
+        // The host calls __triggerFetch and __triggerTask from Rust. They are
+        // made here, before guest code, hold the builtins they call, and are
+        // read-only; addEventListener only fills the slots they read.
+        (function() {
+            const NativeRequest = Request;
+            const parse = JSON.parse;
+            const define = Object.defineProperty;
+            const slots = { fetch: undefined, scheduled: undefined, task: undefined };
+
+            const fixed = function(name, value) {
+                define(globalThis, name, {
+                    value: value,
+                    writable: false,
+                    configurable: false,
+                    enumerable: false,
+                });
+            };
+
+            fixed('__triggerFetch', function(method, url, headers, body, epoch) {
+                const trigger = slots.fetch;
+
+                if (trigger === undefined) {
+                    throw new Error("No fetch handler registered");
+                }
+
+                const request = new NativeRequest(url, {
+                    method: method,
+                    headers: parse(headers),
+                    body: body
+                });
+
+                trigger(request, epoch);
+            });
+
+            fixed('__triggerTask', function(json, epoch) {
+                const trigger = slots.task !== undefined ? slots.task : slots.scheduled;
+
+                if (trigger === undefined) {
+                    throw new Error("No task handler registered");
+                }
+
+                const event = parse(json);
+
+                if (event.scheduledTime === null) {
+                    event.scheduledTime = undefined;
+                }
+
+                return trigger(event, epoch);
+            });
+
+            fixed('__setTrigger', function(type, trigger) {
+                slots[type] = trigger;
+            });
+        })();
+
         globalThis.addEventListener = function(type, handler) {
             if (type === 'fetch') {
-                globalThis.__fetchHandler = handler;
-                globalThis.__triggerFetch = function(request, epoch) {
+                __setTrigger('fetch', function(request, epoch) {
                     const event = {
                         request: request,
                         respondWith: function(responseOrPromise) {
@@ -744,9 +783,9 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
                         console.error('[addEventListener] Error in fetch handler:', error);
                         __finishFetch(new Response(null, { status: 500 }), epoch);
                     }
-                };
+                });
             } else if (type === 'scheduled') {
-                globalThis.__triggerScheduled = async function(event, epoch) {
+                __setTrigger('scheduled', async function(event, epoch) {
                     const promises = [];
 
                     event.waitUntil = function(promise) {
@@ -764,9 +803,9 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
                     } finally {
                         __completeEvent(epoch, JSON.stringify({ success: true }));
                     }
-                };
+                });
             } else if (type === 'task') {
-                globalThis.__taskHandler = async function(event, epoch) {
+                __setTrigger('task', async function(event, epoch) {
                     const waitUntilPromises = [];
 
                     // Default result (success with no data)
@@ -816,7 +855,7 @@ fn setup_event_listener(context: &mut rusty_jsc::JSContext, completion: Rc<RefCe
                     } finally {
                         __completeEvent(epoch, JSON.stringify(globalThis.__taskResult));
                     }
-                };
+                });
             }
         };
     "#;

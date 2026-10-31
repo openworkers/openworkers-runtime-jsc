@@ -790,6 +790,7 @@ version = "0.18.1"
 dependencies = [
  "bytes",
  "env_logger",
+ "libc",
  "log",
  "openworkers-core",
  "openworkers-transform",

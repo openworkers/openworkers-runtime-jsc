@@ -26,9 +26,6 @@ async fn test_task_id_is_not_js_source() {
     let injected = worker
         .evaluate("typeof globalThis.injected")
         .expect("Should evaluate");
-    let injected = injected
-        .to_js_string(worker.context())
-        .expect("Should be a string");
 
-    assert_eq!(injected.to_string(), "undefined");
+    assert_eq!(injected, "undefined");
 }

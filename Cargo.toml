@@ -19,6 +19,9 @@ rusty_jsc_macros = { git = "https://github.com/wasmerio/rusty_jsc", rev = "1a6f7
 # Async runtime
 tokio = { version = "1.43", features = ["full"] }
 
+# Thread CPU clock
+libc = "0.2"
+
 # Logging
 log = "0.4"
 env_logger = "0.11"

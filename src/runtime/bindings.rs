@@ -22,49 +22,113 @@ fn next_callback_id(counter: &CallbackCounter) -> CallbackId {
 
 /// JSC collects whatever JS cannot reach, so pending callbacks live in a JS map
 /// rather than in a Rust one the collector never sees
+///
+/// The host calls these functions from Rust. They are made before guest code,
+/// hold the builtins they call, and are read-only: a guest cannot change
+/// what they do.
 const CALLBACK_REGISTRY_JS: &str = r#"
     (function() {
         const callbacks = new Map();
         const apply = Reflect.apply;
+        const define = Object.defineProperty;
         const clearMap = Map.prototype.clear;
+        const getIn = Map.prototype.get;
+        const setIn = Map.prototype.set;
+        const deleteIn = Map.prototype.delete;
 
-        // The reset between two events. Made before guest code, with the
-        // builtins it calls, and read-only: a guest cannot change what it does
-        Object.defineProperty(globalThis, '__clearCallbacks', {
-            value: function() {
-                apply(clearMap, callbacks, []);
-            },
-            writable: false,
-            configurable: false,
-            enumerable: false,
+        const fixed = function(name, value) {
+            define(globalThis, name, {
+                value: value,
+                writable: false,
+                configurable: false,
+                enumerable: false,
+            });
+        };
+
+        // The reset between two events
+        fixed('__clearCallbacks', function() {
+            apply(clearMap, callbacks, []);
         });
 
-        globalThis.__storeCallback = function(id, callback) {
-            callbacks.set(id, callback);
-        };
+        fixed('__storeCallback', function(id, callback) {
+            apply(setIn, callbacks, [id, callback]);
+        });
 
-        globalThis.__dropCallback = function(id) {
-            callbacks.delete(id);
-        };
+        fixed('__dropCallback', function(id) {
+            apply(deleteIn, callbacks, [id]);
+        });
 
-        globalThis.__runCallback = function(id, ...args) {
-            const callback = callbacks.get(id);
-            callbacks.delete(id);
-
-            if (callback !== undefined) {
-                callback(...args);
-            }
-        };
-
-        globalThis.__runRepeatingCallback = function(id, ...args) {
-            const callback = callbacks.get(id);
+        fixed('__runCallback', function(id, ...args) {
+            const callback = apply(getIn, callbacks, [id]);
+            apply(deleteIn, callbacks, [id]);
 
             if (callback !== undefined) {
-                callback(...args);
+                apply(callback, undefined, args);
             }
-        };
+        });
+
+        fixed('__runRepeatingCallback', function(id, ...args) {
+            const callback = apply(getIn, callbacks, [id]);
+
+            if (callback !== undefined) {
+                apply(callback, undefined, args);
+            }
+        });
     })();
 "#;
+
+/// The values the host makes from Rust for a callback: a Response, a
+/// TypeError, a chunk of a stream. Read-only and made before guest code,
+/// with the builtins they call, as the registry above.
+const HOST_BUILTINS_JS: &str = r#"
+    (function() {
+        const NativeResponse = Response;
+        const NativeTypeError = TypeError;
+        const nativeStream = __createNativeStream;
+        const parse = JSON.parse;
+        const define = Object.defineProperty;
+
+        const fixed = function(name, value) {
+            define(globalThis, name, {
+                value: value,
+                writable: false,
+                configurable: false,
+                enumerable: false,
+            });
+        };
+
+        fixed('__hostResponse', function(streamId, status, statusText, headers) {
+            return new NativeResponse(nativeStream(streamId), {
+                status: status,
+                statusText: statusText,
+                headers: parse(headers),
+            });
+        });
+
+        fixed('__hostTypeError', function(message) {
+            return new NativeTypeError(message);
+        });
+
+        fixed('__hostChunk', function(kind, value) {
+            if (kind === 'data') {
+                return { done: false, value: value };
+            }
+
+            if (kind === 'done') {
+                return { done: true, value: undefined };
+            }
+
+            return { error: value };
+        });
+    })();
+"#;
+
+/// Setup the functions the host uses to make the values of callbacks
+pub fn setup_host_builtins(context: &mut JSContext) {
+    context
+        .evaluate_script(HOST_BUILTINS_JS, 1)
+        .expect("Failed to setup the host builtins");
+}
 
 /// Setup the registry that keeps pending callbacks reachable from JS
 pub fn setup_callback_registry(context: &mut JSContext) {

@@ -14,8 +14,9 @@ mod url;
 // Re-export fetch functions for internal use
 pub use fetch::parse_fetch_options;
 
-use openworkers_core::{HttpRequest, HttpResponseMeta};
-use rusty_jsc::{JSContext, JSValue};
+use crate::cpu_limit::CpuLimit;
+use openworkers_core::{HttpRequest, HttpResponseMeta, TerminationReason};
+use rusty_jsc::{JSContext, JSObject, JSValue};
 use std::rc::Rc;
 use std::sync::Arc;
 use std::time::Duration;
@@ -103,22 +104,41 @@ fn data_view_bytes(context: &JSContext, value: &JSValue) -> Option<bytes::Bytes>
     bytes.get(offset..end).map(bytes::Bytes::copy_from_slice)
 }
 
-/// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`
+/// Copy bytes into a JS-owned Uint8Array, so JS may outlive `bytes`. It runs
+/// no JavaScript, so a Uint8Array that the guest replaced is not called.
 pub(crate) fn new_uint8_array(context: &mut JSContext, bytes: &[u8]) -> Result<JSValue, JSValue> {
-    let script = format!("new Uint8Array({})", bytes.len());
-    let array = context.evaluate_script(&script, 1)?;
+    use rusty_jsc::private;
 
-    if bytes.is_empty() {
-        return Ok(array);
+    let mut exception: private::JSValueRef = std::ptr::null_mut();
+
+    // SAFETY: the context is live
+    let array = unsafe {
+        private::JSObjectMakeTypedArray(
+            context.get_ref(),
+            private::JSTypedArrayType_kJSTypedArrayTypeUint8Array,
+            bytes.len() as u64,
+            &mut exception,
+        )
+    };
+
+    if array.is_null() || !exception.is_null() {
+        return Err(match exception.is_null() {
+            true => JSValue::undefined(context),
+            false => JSValue::from(exception),
+        });
     }
 
-    let array_obj = array.to_object(context)?;
+    let array_obj: JSObject = JSObject::from(array);
+
+    if bytes.is_empty() {
+        return Ok(array_obj.into());
+    }
 
     // SAFETY: the pointer stays valid as long as no JSC call runs, and none does here
     let buffer = unsafe { array_obj.get_typed_array_buffer(context)? };
     buffer.copy_from_slice(bytes);
 
-    Ok(array)
+    Ok(array_obj.into())
 }
 
 /// Message sent from JS to schedule async operations
@@ -171,6 +191,8 @@ pub struct Runtime {
     pub callback_rx: mpsc::UnboundedReceiver<CallbackMessage>,
     /// Stream manager for handling streaming responses
     pub(crate) stream_manager: Arc<stream_manager::StreamManager>,
+    /// The CPU budget of each call into JavaScript; none until a worker sets one
+    pub(crate) cpu: CpuLimit,
 }
 
 impl Runtime {
@@ -236,47 +258,54 @@ impl Runtime {
         // Setup response stream operations for streaming all responses
         bindings::setup_response_stream_ops(&mut context, stream_manager.clone());
 
+        // Last, so it holds the builtins made above, and before guest code
+        bindings::setup_host_builtins(&mut context);
+
+        let cpu = CpuLimit::new(&context, 0).expect("no limit always works");
+
         let runtime = Self {
             context,
             scheduler_tx,
             callback_rx,
             stream_manager: stream_manager.clone(),
+            cpu,
         };
 
         (runtime, scheduler_rx, callback_tx, stream_manager)
     }
 
-    /// Process pending callbacks (non-blocking)
+    /// Process pending callbacks (non-blocking), until the CPU budget is spent
     pub fn process_callbacks(&mut self) {
         while let Ok(msg) = self.callback_rx.try_recv() {
-            self.handle_callback(msg);
+            if self.handle_callback(msg).is_err() {
+                return;
+            }
         }
     }
 
-    pub fn handle_callback(&mut self, msg: CallbackMessage) {
-        match msg {
-            CallbackMessage::ExecuteTimeout(callback_id) => self.run_callback(callback_id, &[]),
+    /// Runs the callback of one message. An error means the CPU budget is
+    /// spent: the event must end.
+    pub fn handle_callback(&mut self, msg: CallbackMessage) -> Result<(), TerminationReason> {
+        let context = &self.context;
+
+        let (runner, callback_id, made) = match msg {
+            CallbackMessage::ExecuteTimeout(callback_id) => {
+                ("__runCallback", callback_id, Ok(vec![]))
+            }
             CallbackMessage::ExecuteInterval(callback_id) => {
                 // Intervals stay registered until they are cleared
-                self.call_registry("__runRepeatingCallback", callback_id, &[])
+                ("__runRepeatingCallback", callback_id, Ok(vec![]))
             }
             CallbackMessage::FetchError(callback_id, message) => {
-                match self.make_network_error(&message) {
-                    Ok(error) => self.run_callback(callback_id, &[error]),
-                    Err(e) => log::error!(
-                        "Failed to create fetch error: {}",
-                        error_text(&self.context, &e)
-                    ),
-                }
+                let message = JSValue::string(context, message.as_str());
+                let error = self.call("__hostTypeError", &[message])?;
+
+                ("__runCallback", callback_id, error.map(|e| vec![e]))
             }
             CallbackMessage::FetchStreamingSuccess(callback_id, meta, stream_id) => {
-                match self.make_response(&meta, stream_id) {
-                    Ok(response) => self.run_callback(callback_id, &[response]),
-                    Err(e) => log::error!(
-                        "Failed to create streaming Response: {}",
-                        error_text(&self.context, &e)
-                    ),
-                }
+                let response = self.make_response(&meta, stream_id)?;
+
+                ("__runCallback", callback_id, response.map(|r| vec![r]))
             }
             #[cfg(feature = "invoke")]
             CallbackMessage::InvokeSettled(callback_id, answer) => {
@@ -284,44 +313,64 @@ impl Runtime {
                     Ok(json) => (true, json),
                     Err(message) => (false, message),
                 };
-                let ok = JSValue::boolean(&self.context, ok);
-                let payload = JSValue::string(&self.context, payload.as_str());
+                let ok = JSValue::boolean(context, ok);
+                let payload = JSValue::string(context, payload.as_str());
 
-                self.run_callback(callback_id, &[ok, payload]);
+                ("__runCallback", callback_id, Ok(vec![ok, payload]))
             }
             CallbackMessage::StreamChunk(callback_id, chunk) => {
-                match self.make_chunk_result(chunk) {
-                    Ok(result) => self.run_callback(callback_id, &[result]),
-                    Err(e) => log::error!(
-                        "Failed to create stream result: {}",
-                        error_text(&self.context, &e)
-                    ),
-                }
+                let result = self.make_chunk_result(chunk)?;
+
+                ("__runCallback", callback_id, result.map(|r| vec![r]))
             }
-        }
-    }
+        };
 
-    /// Run a callback and drop it; only interval ticks keep theirs
-    fn run_callback(&mut self, callback_id: CallbackId, args: &[JSValue]) {
-        self.call_registry("__runCallback", callback_id, args)
-    }
+        let args = match made {
+            Ok(args) => args,
+            Err(e) => {
+                // Read outside the log macro, which skips its arguments when
+                // logging is off: the read is a call under the budget
+                let text = self.value_text(&e)?;
 
-    fn call_registry(&mut self, runner: &str, callback_id: CallbackId, args: &[JSValue]) {
+                log::error!("Failed to make the arguments of callback {callback_id}: {text}");
+
+                return Ok(());
+            }
+        };
+
         log::debug!("Executing callback {}", callback_id);
 
         let mut call_args = vec![JSValue::number(&self.context, callback_id as f64)];
-        call_args.extend_from_slice(args);
+        call_args.extend(args);
 
-        if let Err(e) = bindings::call_global(&self.context, runner, &call_args) {
-            log::error!(
-                "Callback {} failed: {}",
-                callback_id,
-                error_text(&self.context, &e)
-            );
+        if let Err(e) = self.call(runner, &call_args)? {
+            let text = self.value_text(&e)?;
+
+            log::error!("Callback {callback_id} failed: {text}");
         }
+
+        Ok(())
     }
 
-    /// Evaluate a JavaScript script
+    /// Calls a function that the host set on the global object before guest
+    /// code, under the CPU budget. The outer error is a spent budget, the
+    /// inner one a thrown value.
+    pub(crate) fn call(
+        &self,
+        name: &str,
+        args: &[JSValue],
+    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
+        self.cpu
+            .run(|| bindings::call_global(&self.context, name, args))
+    }
+
+    /// The text of a value of the guest, such as a thrown one. Reading it can
+    /// run guest code (toString), so it is a call under the CPU budget too.
+    pub(crate) fn value_text(&self, error: &JSValue) -> Result<String, TerminationReason> {
+        self.cpu.run(|| error_text(&self.context, error))
+    }
+
+    /// Evaluate a JavaScript script, with no CPU budget
     pub fn evaluate(&mut self, script: &str) -> Result<JSValue, JSValue> {
         self.context.evaluate_script(script, 1)
     }
@@ -330,60 +379,41 @@ impl Runtime {
         &mut self,
         meta: &HttpResponseMeta,
         stream_id: stream_manager::StreamId,
-    ) -> Result<JSValue, JSValue> {
-        // The headers and the status text land in JS source, so JSON-encode them
+    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
         let headers_json = serde_json::to_string(&meta.headers).unwrap_or("{}".to_string());
-        let status_text_json =
-            serde_json::to_string(&meta.status_text).unwrap_or_else(|_| "\"\"".to_string());
+        let context = &self.context;
+        let args = [
+            JSValue::number(context, stream_id as f64),
+            JSValue::number(context, meta.status as f64),
+            JSValue::string(context, meta.status_text.as_str()),
+            JSValue::string(context, headers_json.as_str()),
+        ];
 
-        let script = format!(
-            r#"new Response(__createNativeStream({}), {{
-                    status: {},
-                    statusText: {},
-                    headers: {}
-                }})"#,
-            stream_id, meta.status, status_text_json, headers_json
-        );
-
-        self.context.evaluate_script(&script, 1)
-    }
-
-    /// fetch() rejects with a TypeError on a network error
-    fn make_network_error(&mut self, message: &str) -> Result<JSValue, JSValue> {
-        let message_json = serde_json::to_string(message).expect("a string serializes");
-
-        self.context
-            .evaluate_script(&format!("new TypeError({})", message_json), 1)
+        self.call("__hostResponse", &args)
     }
 
     fn make_chunk_result(
         &mut self,
         chunk: stream_manager::StreamChunk,
-    ) -> Result<JSValue, JSValue> {
-        let bytes = match chunk {
-            stream_manager::StreamChunk::Data(bytes) => bytes,
-            stream_manager::StreamChunk::Done => {
-                return self
-                    .context
-                    .evaluate_script("({ done: true, value: undefined })", 1);
+    ) -> Result<Result<JSValue, JSValue>, TerminationReason> {
+        let args = match chunk {
+            stream_manager::StreamChunk::Data(bytes) => {
+                match new_uint8_array(&mut self.context, &bytes) {
+                    Ok(value) => [JSValue::string(&self.context, "data"), value],
+                    Err(e) => return Ok(Err(e)),
+                }
             }
-            stream_manager::StreamChunk::Error(err) => {
-                let err_json = serde_json::to_string(&err).unwrap();
-
-                return self
-                    .context
-                    .evaluate_script(&format!("({{ error: {} }})", err_json), 1);
-            }
+            stream_manager::StreamChunk::Done => [
+                JSValue::string(&self.context, "done"),
+                JSValue::undefined(&self.context),
+            ],
+            stream_manager::StreamChunk::Error(err) => [
+                JSValue::string(&self.context, "error"),
+                JSValue::string(&self.context, err.as_str()),
+            ],
         };
 
-        let wrap = self
-            .context
-            .evaluate_script("(value => ({ done: false, value }))", 1)?
-            .to_object(&self.context)?;
-
-        let value = new_uint8_array(&mut self.context, &bytes)?;
-
-        wrap.call_as_function(&self.context, None, &[value])
+        self.call("__hostChunk", &args)
     }
 }
 
